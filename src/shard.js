@@ -593,7 +593,7 @@ class LedgerShard {
           const diff = target - posted;
           const isAdj = v <= acct.closedThrough;
           const rec = Object.freeze({
-            accrualId: `ACR:${acct.id}:D${v}:${this.accruals.length}`, account: acct.id, currency: acct.currency,
+            accrualId: `ACR:${acct.id}:D${v}:${acct.accrualRecords + 1}`, account: acct.id, currency: acct.currency,
             valueDate: v, postingDate: D, amount: diff,
             kind: isAdj ? 'ACCRUAL_ADJUSTMENT' : 'ACCRUAL',
             exactCumulative: `${cum}/${rDen}`,

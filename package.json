@@ -9,9 +9,9 @@
   "scripts": {
     "replay": "node bin/replay.js data/scenario.ndjson",
     "replay:sharded": "node bin/replay.js data/scenario.ndjson --shards 2",
-    "test": "node --test test/unit/ test/scenario/",
-    "test:known-failing": "node --test test/known-failing/",
-    "test:all": "node --test test/",
+    "test": "node --test test/unit/*.test.js test/scenario/*.test.js",
+    "test:known-failing": "node --test test/known-failing/*.test.js",
+    "test:all": "node --test test/unit/*.test.js test/scenario/*.test.js test/known-failing/*.test.js",
     "gen:load": "node scripts/gen-load.js",
     "bench": "node scripts/bench.js"
   },

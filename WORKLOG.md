@@ -78,7 +78,7 @@ The first end-to-end replay (in-process) gave exactly the numbers worked out at 
 - The 50k synthetic stream differed between modes **only in the order of error-code keys** (insertion order
   depends on the shard). The merge now sorts the keys, and the output is identical after that.
 
-### 2026-09-27 17:45–17:55 — performance: the first numbers were bad, and here is what fixed them
+### 2026-09-27 17:43–17:49 — performance: the first numbers were bad, and here is what fixed them
 The 1M events / 100k accounts synthetic stream on this 2-vCPU box first ran at **60,518 ev/s with 2.44 GB peak RSS**.
 The CPU profile of a 300k slice showed GC at about 40%. `LedgerError` construction was about 10%, because each
 one captured a stack.
@@ -105,3 +105,16 @@ Memory is the real ceiling. Each event keeps an event-log record with a narratio
 from/to blocks and a narration, and a Ref. That is about 1.9 KB per event all-in at 1M. That cost follows
 from "in-memory, append-only, nothing deleted" plus the narration requirement. It is written up in
 AMBIGUITIES/README rather than hidden.
+
+### 2026-09-27 17:58 — test suite; the determinism test caught a real bug
+- `npm test` has 48 tests: money, validation, shard rules, the 8 acceptance criteria (accepted ones asserted
+  as written, rejected ones asserted false with the actual values pinned), the per-day output for D1–D6,
+  sharded ≡ in-process, and the CLI.
+- **Bug found by the sharding test:** accrual IDs used a shard-global counter (`this.accruals.length`), so
+  the same scenario produced `ACR:ACC-002:D5:12` in-process and `ACR:ACC-002:D5:0` with 2 shards. Changed
+  to a per-account counter. The text output never showed accrual IDs, so the earlier diff of CLI output
+  could not have caught it. Only a full JSON comparison could.
+- The first draft of one of my own unit assertions was wrong: I expected (2^52+1)/2 → 2^51+1, but half-even
+  keeps 2^51. The test was fixed, not the code.
+- Known-failing test: `test/known-failing/fees-after-reversal.test.js`. It shows AED 75.00 in fees surviving
+  a same-value-date reversal, and a control test shows the fees depend on arrival order.
