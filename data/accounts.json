@@ -1,4 +1,6 @@
 [
-  { "id": "ACC-001", "currency": "AED", "openingBalance": "0.00" },
-  { "id": "ACC-002", "currency": "BHD", "openingBalance": "0.000" }
+  { "id": "ACC-001", "currency": "AED", "openingBalance": "0.00",
+    "accountName": "ACC1 Account Name", "bankName": "ACC1 Bank Name", "bic": "ACC1BICX", "iban": "AE00ACC1DUMMYIBAN0000001" },
+  { "id": "ACC-002", "currency": "BHD", "openingBalance": "0.000",
+    "accountName": "ACC2 Account Name", "bankName": "ACC2 Bank Name", "bic": "ACC2BICX", "iban": "BH00ACC2DUMMYIBAN00002" }
 ]
