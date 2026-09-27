@@ -125,22 +125,22 @@ function renderStatement(reports) {
   for (const r of reports) {
     if (!r.accounts) return '';
     for (const a of r.accounts) {
-      if (!byAcct.has(a.account)) byAcct.set(a.account, { currency: a.currency, entries: [] });
+      if (!byAcct.has(a.account)) byAcct.set(a.account, { currency: a.currency, opening: a.opening, entries: [] });
       byAcct.get(a.account).entries.push(...a.entries);
     }
   }
   const out = ['', '════════════════ ACCOUNT STATEMENTS (every entry, debit and credit kept separate) ════════════════'];
-  for (const [id, { currency: c, entries }] of byAcct) {
-    out.push(`  ${id} (${c})`);
-    out.push(`    ${'entry'.padEnd(16)} ${'kind'.padEnd(10)} ${'posted'.padEnd(6)} ${'value'.padEnd(5)} ${'debit'.padStart(12)} ${'credit'.padStart(12)}  refersTo`);
+  for (const [id, { currency: c, opening, entries }] of byAcct) {
+    out.push(`  ${id} (${c})   opening balance ${fm(opening, c)}`);
+    out.push(`    ${'entry'.padEnd(20)} ${'kind'.padEnd(10)} ${'posted'.padEnd(6)} ${'value'.padEnd(5)} ${'debit'.padStart(12)} ${'credit'.padStart(12)}  refersTo`);
     let dr = 0; let cr = 0;
     for (const e of entries) {
       const d = e.direction === 'DEBIT';
       if (d) dr += e.amount; else cr += e.amount;
-      out.push(`    ${e.entryId.padEnd(16)} ${e.kind.padEnd(10)} ${('D' + e.postingDate).padEnd(6)} ${('D' + e.valueDate).padEnd(5)} `
+      out.push(`    ${e.entryId.padEnd(20)} ${e.kind.padEnd(10)} ${('D' + e.postingDate).padEnd(6)} ${('D' + e.valueDate).padEnd(5)} `
         + `${(d ? fm(e.amount, c) : '').padStart(12)} ${(d ? '' : fm(e.amount, c)).padStart(12)}  ${e.refersTo ?? ''}`);
     }
-    out.push(`    ${'TOTAL'.padEnd(40)} ${fm(dr, c).padStart(12)} ${fm(cr, c).padStart(12)}  net ${fm(cr - dr, c)}`);
+    out.push(`    ${'TOTAL'.padEnd(44)} ${fm(dr, c).padStart(12)} ${fm(cr, c).padStart(12)}  movement ${fm(cr - dr, c)}, closing ${fm(opening + cr - dr, c)}`);
   }
   return out.join('\n');
 }

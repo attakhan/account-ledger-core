@@ -1,0 +1,4 @@
+[
+  { "id": "ACC-001", "currency": "AED", "openingBalance": "100.00", "accountName": "ACC1 Account Name", "bankName": "ACC1 Bank Name" },
+  { "id": "ACC-003", "currency": "AED", "openingBalance": "0.00", "accountName": "ACC3 Account Name", "bankName": "ACC3 Bank Name" }
+]

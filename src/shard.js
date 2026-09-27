@@ -661,7 +661,7 @@ class LedgerShard {
             changedToday: a.history.some((h) => h.day === D) });
         }
         accountsOut.push({
-          account: acct.id, currency: acct.currency, party: acct.party, closing,
+          account: acct.id, currency: acct.currency, party: acct.party, opening: acct.g(F_DELTA, 0), closing,
           preCapitalization: capitalized ? closing - capitalized : null,
           holds: acct.holds, available: money.safe(acct.book - acct.holds),
           fees, accruals: accr, accruedToDate: acct.accrualSum, restated, capitalized, auths,

@@ -1,0 +1,5 @@
+{"id":"T1-OUT","day":1,"type":"DEBIT","account":"ACC-001","currency":"AED","amount":"100.00","valueDate":1,"transferId":"T1","counterparty":{"accountNumber":"ACC-003","accountName":"ACC3 Account Name","bankName":"ACC3 Bank Name"}}
+{"id":"T1-IN","day":1,"type":"CREDIT","account":"ACC-003","currency":"AED","amount":"100.00","valueDate":1,"transferId":"T1","counterparty":{"accountNumber":"ACC-001","accountName":"ACC1 Account Name","bankName":"ACC1 Bank Name"}}
+{"id":"C1","day":2,"type":"CHARGE","account":"ACC-001","currency":"AED","amount":"10.00","valueDate":2}
+{"id":"R1","day":3,"type":"REFUND","account":"ACC-001","refersTo":"C1","valueDate":3}
+{"id":"FR1","day":4,"type":"REFUND","account":"ACC-001","refersTo":"FEE:ACC-001:D2","valueDate":4}

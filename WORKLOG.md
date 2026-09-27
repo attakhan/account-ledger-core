@@ -106,7 +106,7 @@ from/to blocks and a narration, and a Ref. That is about 1.9 KB per event all-in
 from "in-memory, append-only, nothing deleted" plus the narration requirement. It is written up in
 AMBIGUITIES/README rather than hidden.
 
-### 2026-09-27 17:58 — test suite; the determinism test caught a real bug
+### 2026-09-27 17:52 — test suite; the determinism test caught a real bug
 - `npm test` has 48 tests: money, validation, shard rules, the 8 acceptance criteria (accepted ones asserted
   as written, rejected ones asserted false with the actual values pinned), the per-day output for D1–D6,
   sharded ≡ in-process, and the CLI.
