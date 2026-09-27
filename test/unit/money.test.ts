@@ -1,10 +1,9 @@
-'use strict';
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const m = require('../../src/money');
-const { CODES } = require('../../src/errors');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as m from '../../src/money';
+import { CODES } from '../../src/errors';
 
-const code = (c) => (e) => e.code === c;
+const code = (c: string) => (e: unknown): boolean => (e as { code?: string }).code === c;
 
 test('parseAmount: strings to minor units at each currency precision', () => {
   assert.equal(m.parseAmount('1,200.00', 'AED'), 120000);

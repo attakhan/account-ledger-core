@@ -1,14 +1,15 @@
-'use strict';
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { harness } = require('../helpers');
-const { DEFAULT_POLICY } = require('../../src/config');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { harness } from '../helpers';
+import { DEFAULT_POLICY } from '../../src/config';
+import type { Policy } from '../../src/types';
 
 const A = 'ACC-001';
 const B = 'ACC-002';
-const cr = (id, day, amount, extra = {}) => ({ id, day, type: 'CREDIT', account: A, currency: 'AED', amount, valueDate: day, ...extra });
-const dr = (id, day, amount, extra = {}) => ({ id, day, type: 'DEBIT', account: A, currency: 'AED', amount, valueDate: day, ...extra });
-const withVat = Object.freeze({ ...DEFAULT_POLICY, vatBps: Object.freeze({ AED: 500, BHD: 0 }) });
+type Extra = Record<string, unknown>;
+const cr = (id: string, day: number, amount: unknown, extra: Extra = {}) => ({ id, day, type: 'CREDIT', account: A, currency: 'AED', amount, valueDate: day, ...extra });
+const dr = (id: string, day: number, amount: unknown, extra: Extra = {}) => ({ id, day, type: 'DEBIT', account: A, currency: 'AED', amount, valueDate: day, ...extra });
+const withVat: Policy = Object.freeze({ ...DEFAULT_POLICY, vatBps: Object.freeze({ AED: 500, BHD: 0 }) });
 
 test('authorization boundary: approved when available lands exactly on zero, declined one fil over', () => {
   const h = harness();
@@ -24,7 +25,7 @@ test('settlement rules: declined auth, double settle, over-hold, duplicate auth 
   h.ev(cr('c', 1, '50.00'));
   h.ev({ id: 'a1', day: 1, type: 'AUTHORIZATION', account: A, currency: 'AED', authId: 'OK', amount: '40.00' });
   h.ev({ id: 'a2', day: 1, type: 'AUTHORIZATION', account: A, currency: 'AED', authId: 'NO', amount: '40.00' });
-  const st = (id, auth, amount) => h.ev({ id, day: 1, type: 'SETTLEMENT', account: A, currency: 'AED', authId: auth, amount });
+  const st = (id: string, auth: string, amount: string) => h.ev({ id, day: 1, type: 'SETTLEMENT', account: A, currency: 'AED', authId: auth, amount });
   assert.equal(st('s1', 'NO', '10.00').code, 'SETTLEMENT_AUTH_DECLINED');
   assert.equal(st('s2', 'OK', '40.01').code, 'SETTLEMENT_EXCEEDS_AUTH');
   assert.equal(st('s3', 'OK', '40.00').status, 'ACCEPTED');
@@ -57,7 +58,7 @@ test('value-date guards: future, before window, before the original', () => {
 
 test('structural validation errors do not throw and do not move money', () => {
   const h = harness();
-  const bad = [
+  const bad: [unknown, string][] = [
     [null, 'INVALID_EVENT'],
     [{ id: 'x', day: 1, type: 'TELEPORT', account: A }, 'UNKNOWN_EVENT_TYPE'],
     [cr('x2', 1, 12.5), 'INVALID_AMOUNT'],
@@ -92,8 +93,8 @@ test('reversal, return and refund each add a SEPARATE opposite entry; the origin
     ['rf', 'REFUND', 'CREDIT', 20000, 'd'],
   ]);
   const ret = h.shard.journal[2];
-  assert.equal(ret.from.accountNumber, 'SHOP');
-  assert.equal(ret.to.accountNumber, A);
+  assert.equal(ret.from?.accountNumber, 'SHOP');
+  assert.equal(ret.to?.accountNumber, A);
   assert.equal(h.shard.bookBalance(A), 100000);
   // a credit can be reversed (DEBIT entry) but not refunded
   assert.equal(h.ev({ id: 'rfc', day: 1, type: 'REFUND', account: A, refersTo: 'c' }).code, 'REFERENCE_NOT_ELIGIBLE');
@@ -128,7 +129,7 @@ test('VAT (when enabled) is a separate entry on fees and charges, and is refunde
   h.ev({ id: 'rf2', day: 2, type: 'REFUND', account: A, refersTo: 'FEE:ACC-001:D1' });
   const back = h.shard.journal.filter((e) => e.eventId === 'rf1' || e.eventId === 'rf2').map((e) => [e.entryId, e.kind, e.amount]);
   assert.deepEqual(back, [['rf1', 'REFUND', 1000], ['VAT:rf1', 'VAT_REFUND', 50], ['rf2', 'REFUND', 1500], ['VAT:rf2', 'VAT_REFUND', 75]]);
-  const vatGl = h.shard.journal.filter((e) => e.kind.startsWith('VAT')).every((e) => (e.direction === 'DEBIT' ? e.to : e.from).accountNumber === 'GL-2300');
+  const vatGl = h.shard.journal.filter((e) => e.kind.startsWith('VAT')).every((e) => (e.direction === 'DEBIT' ? e.to : e.from)?.accountNumber === 'GL-2300');
   assert.ok(vatGl, 'VAT entries point at the VAT-payable GL');
 });
 
@@ -167,7 +168,7 @@ test('interest: negative days accrue nothing; carried rounding beats per-day rou
   // exact cumulative 1.66, 3.32, 4.98, 6.64, 8.30, 9.96 → rounded 2,3,5,7,8,10 → daily 2,1,2,2,1,2
   assert.deepEqual(days, [2, 1, 2, 2, 1, 2]);
   assert.equal(days.reduce((a, b) => a + b, 0), 10, 'per-day rounding would give 2×6 = 12 fils');
-  assert.equal(h.shard.journal.find((e) => e.kind === 'INTEREST').amount, 10);
+  assert.equal(h.shard.journal.find((e) => e.kind === 'INTEREST')?.amount, 10);
 });
 
 test('window closes after D6: later events are rejected WINDOW_CLOSED', () => {
@@ -179,7 +180,7 @@ test('window closes after D6: later events are rejected WINDOW_CLOSED', () => {
 test('an internal bug is fail-stop: recorded as INTERNAL_ERROR and re-thrown', () => {
   const h = harness();
   assert.throws(() => h.ev(cr('future', 3, '1.00')), /delivered while day 1 is open/);
-  assert.equal(h.shard.eventLog.at(-1).code, 'INTERNAL_ERROR');
+  assert.equal(h.shard.eventLog.at(-1)?.code, 'INTERNAL_ERROR');
 });
 
 test('overflow is refused before any state changes', () => {
@@ -201,10 +202,10 @@ test('transfer between two ledger accounts: two legs, shared transferId, each sh
   h.ev({ id: 'T1-in', day: 1, type: 'CREDIT', account: 'ACC-003', currency: 'AED', amount: '40.00', transferId: 'T1',
     counterparty: { accountNumber: 'ACC-001', accountName: 'ACC1 Account Name', bankName: 'ACC1 Bank Name' } });
   const [out, inn] = h.shard.journal;
-  assert.equal(out.from.accountNumber, 'ACC-001');
-  assert.equal(out.to.accountNumber, 'ACC-003');
-  assert.equal(inn.from.accountNumber, 'ACC-001');
-  assert.equal(inn.to.accountNumber, 'ACC-003');
+  assert.equal(out.from?.accountNumber, 'ACC-001');
+  assert.equal(out.to?.accountNumber, 'ACC-003');
+  assert.equal(inn.from?.accountNumber, 'ACC-001');
+  assert.equal(inn.to?.accountNumber, 'ACC-003');
   assert.equal(out.transferId, inn.transferId);
   assert.match(out.narration, /\[transfer T1\]/);
 });

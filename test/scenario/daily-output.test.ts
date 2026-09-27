@@ -1,17 +1,17 @@
-'use strict';
 /**
  * Pins the full per-day output of the brief's replay: closing ledger balance,
  * fee assessments, authorization states and errors, for every day and account.
  * Numbers are minor units (fils).
  */
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { runScenario } = require('../helpers');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { runScenario, type Scenario } from '../helpers';
 
-let S;
+let S: Scenario;
 test.before(async () => { S = await runScenario(); });
 
-const EXPECTED = {
+type Expected = [number, number, number[], Record<string, string>, number, string[]];
+const EXPECTED: Record<string, Expected> = {
   // day: [ACC-001 closing, available, feeValueDates, auth states, ACC-002 closing, error event ids]
   1: [25000, 25000, [], {}, 0, []],
   2: [25000, 5000, [], { 'Auth-A': 'APPROVED' }, 0, []],
@@ -66,22 +66,22 @@ test('every journal entry has from/to blocks, a direction, a positive amount and
     assert.ok(Number.isSafeInteger(e.amount) && e.amount > 0);
     assert.ok(typeof e.narration === 'string' && e.narration.includes(`posted D${e.postingDate}, value D${e.valueDate}`));
     const own = e.direction === 'CREDIT' ? e.to : e.from;
-    assert.equal(own.accountNumber, e.account, 'own side is on the side the direction implies');
+    assert.equal(own?.accountNumber, e.account, 'own side is on the side the direction implies');
   }
-  const fee = S.shard.journal.find((e) => e.entryId === 'FEE:ACC-001:D2');
-  assert.equal(fee.to.accountNumber, 'GL-4100');
+  const fee = S.shard.journal.find((e) => e.entryId === 'FEE:ACC-001:D2')!;
+  assert.equal(fee.to?.accountNumber, 'GL-4100');
   assert.match(fee.narration, /D2 closing balance AED -370\.00 recomputed at D5 close after back-valued E7/);
-  const e9 = S.shard.journal.find((e) => e.entryId === 'E9');
-  assert.equal(e9.from.accountNumber, 'EXT-E7-PAYEE', 'a reversal flips the parties of the original');
-  assert.equal(e9.to.accountName, 'ACC1 Account Name');
+  const e9 = S.shard.journal.find((e) => e.entryId === 'E9')!;
+  assert.equal(e9.from?.accountNumber, 'EXT-E7-PAYEE', 'a reversal flips the parties of the original');
+  assert.equal(e9.to?.accountName, 'ACC1 Account Name');
 });
 
 test('append-only: records are frozen; the log keeps every inbound event including rejected ones', () => {
-  'use strict';
-  const e = S.shard.journal[0];
+  // Bypass `readonly` on purpose: the runtime freeze is what is under test.
+  const e = S.shard.journal[0] as { amount: number };
   assert.throws(() => { e.amount = 1; }, TypeError);
-  assert.throws(() => { S.shard.eventLog[0].status = 'X'; }, TypeError);
-  assert.throws(() => { S.shard.accruals[0].amount = 1; }, TypeError);
+  assert.throws(() => { (S.shard.eventLog[0] as { status: string }).status = 'X'; }, TypeError);
+  assert.throws(() => { (S.shard.accruals[0] as { amount: number }).amount = 1; }, TypeError);
   assert.deepEqual(S.shard.eventLog.map((l) => [l.eventId, l.status]), [
     ['E1', 'ACCEPTED'], ['E2', 'ACCEPTED'], ['E3', 'ACCEPTED'], ['E4', 'ACCEPTED'], ['E5', 'ACCEPTED'],
     ['E6', 'REJECTED'], ['E7', 'ACCEPTED'], ['E8', 'ACCEPTED'], ['E9', 'ACCEPTED'], ['E10', 'ACCEPTED']]);

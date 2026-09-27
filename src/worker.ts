@@ -1,4 +1,3 @@
-'use strict';
 /**
  * Shard worker: owns one LedgerShard. Messages are processed strictly in
  * arrival order, so per-account event order equals router order.
@@ -8,30 +7,34 @@
  * An exception that escapes (an InvariantError or INTERNAL_ERROR) crashes the
  * worker on purpose, and the router fails the whole replay (fail-stop).
  */
-const { parentPort, workerData } = require('node:worker_threads');
-const { LedgerShard } = require('./shard');
+import { parentPort, workerData } from 'node:worker_threads';
+import { LedgerShard, type LedgerShardOptions } from './shard';
+import type { WorkerCommand, WorkerReply } from './sharded';
 
-const shard = new LedgerShard(workerData);
+if (!parentPort) throw new Error('worker.ts must run as a worker thread');
+const port = parentPort;
+const shard = new LedgerShard(workerData as LedgerShardOptions);
+const reply = (m: WorkerReply): void => port.postMessage(m);
 
-parentPort.on('message', (m) => {
+port.on('message', (m: WorkerCommand) => {
   switch (m.t) {
     case 'b': {
       const it = m.items;
       for (let i = 0; i < it.length; i += 2) {
         const x = it[i + 1];
         // The router already proved the line parses, so a parse here cannot fail.
-        shard.apply(typeof x === 'string' ? JSON.parse(x) : x, it[i]);
+        shard.apply(typeof x === 'string' ? JSON.parse(x) : x, it[i] as number);
       }
-      parentPort.postMessage({ t: 'ack' });
+      reply({ t: 'ack' });
       break;
     }
     case 'r':
       shard.rejectRaw(m.seq, m.code, m.msg);
       break;
     case 'c':
-      parentPort.postMessage({ t: 'report', report: shard.closeDay(m.day) });
+      reply({ t: 'report', report: shard.closeDay(m.day) });
       break;
     default:
-      throw new Error(`unknown message ${m.t}`);
+      throw new Error(`unknown message ${(m as { t: unknown }).t}`);
   }
 });

@@ -29,7 +29,7 @@ last close, and assesses a fee for any day that is now negative and has no fee y
 Day 5 and before any fee is assessed") describes exactly this re-evaluation. A rule that ignored
 back-valued entries would never need that parenthetical.
 
-**Evidence.** `closeDay` in `src/shard.js`; the D5 report shows three fees.
+**Evidence.** `closeDay` in `src/shard.ts`; the D5 report shows three fees.
 
 ### A3 — E10 is listed after E9 (Day 6) but stamped Day 5
 **Ambiguity.** "Replayed in this order", but the stamped day goes backwards.
@@ -85,7 +85,7 @@ positive, yet three fees were assessed while E7 stood.
 - The ledger *can* do it: `REFUND` of `FEE:<acct>:D<n>` posts a separate CREDIT, plus a separate
   VAT_REFUND if VAT applied.
 
-**Evidence.** The known-failing test (`test/known-failing/fees-after-reversal.test.js`) states the
+**Evidence.** The known-failing test (`test/known-failing/fees-after-reversal.test.ts`) states the
 customer-fairness case, and shows that the outcome depends on arrival order.
 
 ### A8 — Settlement for an authorization that does not exist (E6 / Auth-Z)

@@ -1,15 +1,14 @@
-'use strict';
 /**
  * The brief's eight acceptance criteria, each checked against the replay.
  * ACCEPTED criteria are asserted as written. REJECTED criteria (see
  * REJECTED.md) are asserted to be FALSE, and the test pins what actually
  * happens instead, so the reasoning is executable.
  */
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { runScenario } = require('../helpers');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { runScenario, type Scenario } from '../helpers';
 
-let S;
+let S: Scenario;
 test.before(async () => { S = await runScenario(); });
 
 test('C1 ACCEPTED: Day 2 closing ledger balance, evaluated at end of Day 5 before any fee, is AED −370.00', () => {
@@ -38,9 +37,9 @@ test('C2 REJECTED: "E7 causes exactly one overdraft fee, on Day 2" — it causes
 });
 
 test('C3 ACCEPTED: the Day 4 settlement of Auth-A is accepted (185.00 against a 200.00 hold, 15.00 released)', () => {
-  const log = S.shard.eventLog.find((l) => l.eventId === 'E5');
+  const log = S.shard.eventLog.find((l) => l.eventId === 'E5')!;
   assert.equal(log.status, 'ACCEPTED');
-  const a = S.shard.auth('ACC-001', 'Auth-A');
+  const a = S.shard.auth('ACC-001', 'Auth-A')!;
   assert.equal(a.state, 'SETTLED');
   assert.equal(a.settledAmount, 18500);
   assert.equal(a.releasedAmount, 1500);
@@ -49,7 +48,7 @@ test('C3 ACCEPTED: the Day 4 settlement of Auth-A is accepted (185.00 against a 
 });
 
 test('C4 ACCEPTED: a settlement for an unknown auth id (Auth-Z) is rejected and no funds leave', () => {
-  const log = S.shard.eventLog.find((l) => l.eventId === 'E6');
+  const log = S.shard.eventLog.find((l) => l.eventId === 'E6')!;
   assert.equal(log.status, 'REJECTED');
   assert.equal(log.code, 'SETTLEMENT_UNKNOWN_AUTH');
   assert.equal(S.shard.journal.filter((e) => e.eventId === 'E6').length, 0, 'no ledger entry for E6');
@@ -63,7 +62,7 @@ test('C5 ACCEPTED (conditional): an approved hold reduces available, not ledger 
   assert.equal(d2.closing, 25000, 'ledger unchanged by the hold');
   assert.equal(d2.available, 5000, 'available = 250.00 − 200.00');
   // Auth-B: E7 was booked before E8 on D5, so the ledger is −155.00 and available would be −245.00.
-  const b = S.shard.auth('ACC-001', 'Auth-B');
+  const b = S.shard.auth('ACC-001', 'Auth-B')!;
   assert.equal(b.state, 'DECLINED');
   assert.equal(b.availableAfter, -24500);
   assert.equal(S.acct(5, 'ACC-001').holds, 0, 'a declined auth places no hold');
@@ -77,10 +76,10 @@ test('C6 REJECTED: "after E9 all balances and fees return to pre-E7 values" — 
   assert.notEqual(d6.preCapitalization, preE7);
   assert.equal(S.shard.journal.filter((e) => e.kind === 'FEE').length, 3, 'fees are not un-assessed');
   assert.equal(d6.fees.length, 0, 'but no new fee after the reversal');
-  assert.equal(S.shard.auth('ACC-001', 'Auth-B').state, 'DECLINED', 'a decision taken on D5 is not re-run');
+  assert.equal(S.shard.auth('ACC-001', 'Auth-B')?.state, 'DECLINED', 'a decision taken on D5 is not re-run');
   // E7 itself is still in the journal; the reversal is a separate entry.
-  const e7 = S.shard.journal.find((e) => e.entryId === 'E7');
-  const e9 = S.shard.journal.find((e) => e.entryId === 'E9');
+  const e7 = S.shard.journal.find((e) => e.entryId === 'E7')!;
+  const e9 = S.shard.journal.find((e) => e.entryId === 'E9')!;
   assert.equal(e7.direction, 'DEBIT');
   assert.equal(e9.direction, 'CREDIT');
   assert.equal(e9.refersTo, 'E7');
@@ -99,7 +98,7 @@ test('C8 REJECTED: "remainder discarded" — there is no remainder; accrual reco
   for (const [id, expected] of [['ACC-001', 92], ['ACC-002', 8]]) {
     const recs = S.shard.accruals.filter((a) => a.account === id);
     const sum = recs.reduce((s, a) => s + a.amount, 0);
-    const cap = S.shard.journal.find((e) => e.kind === 'INTEREST' && e.account === id);
+    const cap = S.shard.journal.find((e) => e.kind === 'INTEREST' && e.account === id)!;
     assert.equal(sum, expected);
     assert.equal(cap.amount, sum, `${id}: capitalized === Σ accrual records`);
   }

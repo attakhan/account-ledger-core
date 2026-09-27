@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-'use strict';
 /**
  * Deterministic synthetic load for the ledger: N accounts (AED/BHD mix) and M
  * events spread across the 6-day window, in stream order. The mix includes
@@ -7,12 +6,13 @@
  * (some orphaned, some over the hold), reversals, returns, refunds, charges,
  * instalment credits, late arrivals, duplicate ids and malformed lines.
  *
- *   node scripts/gen-load.js --accounts 100000 --events 1000000 --out bench-out [--seed 42]
+ *   node dist/scripts/gen-load.js --accounts 100000 --events 1000000 --out bench-out [--seed 42]
  */
-const fs = require('node:fs');
-const path = require('node:path');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { AccountConfig } from '../src/types';
 
-const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, arr) => {
+const args: Record<string, string | undefined> = Object.fromEntries(process.argv.slice(2).reduce<[string, string][]>((acc, a, i, arr) => {
   if (a.startsWith('--')) acc.push([a.slice(2), arr[i + 1]]);
   return acc;
 }, []));
@@ -21,17 +21,17 @@ const M = Number(args.events ?? 100_000);
 const OUT = args.out ?? 'bench-out';
 let seed = Number(args.seed ?? 42) >>> 0;
 
-function rnd() { // mulberry32
+function rnd(): number { // mulberry32
   seed = (seed + 0x6d2b79f5) >>> 0;
   let t = seed;
   t = Math.imul(t ^ (t >>> 15), t | 1);
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
-const ri = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+const ri = (lo: number, hi: number): number => lo + Math.floor(rnd() * (hi - lo + 1));
 
 fs.mkdirSync(OUT, { recursive: true });
-const accounts = [];
+const accounts: AccountConfig[] = [];
 for (let i = 0; i < N; i++) {
   const ccy = i % 10 === 9 ? 'BHD' : 'AED';
   accounts.push({ id: `A${String(i).padStart(7, '0')}`, currency: ccy, openingBalance: ccy === 'AED' ? `${ri(0, 5000)}.00` : `${ri(0, 500)}.000`,
@@ -39,14 +39,16 @@ for (let i = 0; i < N; i++) {
 }
 fs.writeFileSync(path.join(OUT, 'accounts.json'), JSON.stringify(accounts));
 
-const amt = (ccy, max) => (ccy === 'AED' ? `${ri(1, max)}.${String(ri(0, 99)).padStart(2, '0')}` : `${ri(0, Math.ceil(max / 10))}.${String(ri(1, 999)).padStart(3, '0')}`);
+const amt = (ccy: string, max: number): string => (ccy === 'AED' ? `${ri(1, max)}.${String(ri(0, 99)).padStart(2, '0')}` : `${ri(0, Math.ceil(max / 10))}.${String(ri(1, 999)).padStart(3, '0')}`);
 const ws = fs.createWriteStream(path.join(OUT, 'events.ndjson'));
 const perDay = Math.ceil(M / 6);
-const recent = []; // [acctIdx, eventId, type, authId]
-let buf = [];
+type Recent = [acctIdx: number, eventId: string, type: string, authId: string | undefined];
+type GenEvent = { id: string; day: number; type: string; account: string; authId?: string; [k: string]: unknown };
+const recent: Recent[] = [];
+let buf: string[] = [];
 let written = 0;
 
-function emit(o) { buf.push(typeof o === 'string' ? o : JSON.stringify(o)); written++; }
+function emit(o: GenEvent | string): void { buf.push(typeof o === 'string' ? o : JSON.stringify(o)); written++; }
 
 (async () => {
   for (let k = 0; k < M; k++) {
@@ -56,7 +58,7 @@ function emit(o) { buf.push(typeof o === 'string' ? o : JSON.stringify(o)); writ
     const id = `X${k}`;
     const r = rnd();
     const cp = { accountNumber: `CP${ri(1, 99999)}`, accountName: 'Counterparty Name', bankName: 'Counterparty Bank' };
-    let ev;
+    let ev: GenEvent;
     let evAi = ai;
     if (r < 0.30) ev = { id, day, type: 'CREDIT', account: a.id, currency: a.currency, amount: amt(a.currency, 3000), valueDate: day, counterparty: cp };
     else if (r < 0.52) ev = { id, day, type: 'DEBIT', account: a.id, currency: a.currency, amount: amt(a.currency, 2500), valueDate: rnd() < 0.1 ? ri(1, day) : day, counterparty: cp };
@@ -85,7 +87,7 @@ function emit(o) { buf.push(typeof o === 'string' ? o : JSON.stringify(o)); writ
       recent.push([evAi, ev.id, ev.type, ev.authId]);
       if (recent.length > 5000) recent.splice(0, 1000);
     }
-    if (buf.length >= 10_000) { if (!ws.write(buf.join('\n') + '\n')) await new Promise((r2) => ws.once('drain', r2)); buf = []; }
+    if (buf.length >= 10_000) { if (!ws.write(buf.join('\n') + '\n')) await new Promise<void>((r2) => ws.once('drain', () => r2())); buf = []; }
   }
   ws.end(buf.join('\n') + (buf.length ? '\n' : ''));
   ws.on('finish', () => process.stderr.write(`wrote ${N} accounts, ${written} lines to ${OUT}/\n`));

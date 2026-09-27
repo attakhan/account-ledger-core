@@ -1,4 +1,3 @@
-'use strict';
 /**
  * LedgerShard: the whole ledger engine for a set of accounts. Accounts never
  * interact, so a shard is an independent unit. The single-process replayer
@@ -20,10 +19,15 @@
  * state (balances by value day, holds, auth status) is a derived index. It can
  * be rebuilt from the records and is the only thing that changes.
  */
-const { CODES, LedgerError, InvariantError } = require('./errors');
-const money = require('./money');
-const { normalizeEvent } = require('./events');
-const { DEFAULT_POLICY } = require('./config');
+import { CODES, LedgerError, InvariantError, type ErrorCode } from './errors';
+import * as money from './money';
+import { normalizeEvent } from './events';
+import { DEFAULT_POLICY } from './config';
+import type {
+  AccountConfig, AccountDayReport, AccrualRecord, AccrualView, ApplyResult, Authorization, AuthView, CurrencyTotals,
+  DayReport, DayStats, Direction, EntryKind, ErrorSample, EventLogRecord, FeeAssessment, JournalEntry,
+  NormalizedEvent, Notice, Party, Policy, Restatement,
+} from './types';
 
 // Packed per-account, per-value-day state: one Float64Array per account.
 const F_DELTA = 0;   // net signed movement with this value day (fees included)
@@ -34,10 +38,11 @@ const F_CUMNUM = 4;  // cumulative exact interest numerator (Σ max(0,closing) �
 const F_ACCRUED = 5; // net accrual posted for this value day (Σ of accrual records)
 const NF = 6;
 
-const REVERSIBLE = new Set(['CREDIT', 'DEBIT', 'SETTLEMENT', 'CHARGE']);
-const RETURNABLE = new Set(['DEBIT', 'SETTLEMENT']);
-const REFUNDABLE = new Set(['DEBIT', 'SETTLEMENT', 'FEE', 'CHARGE']);
-const OPPOSITE = { DEBIT: 'CREDIT', CREDIT: 'DEBIT' };
+type RefKind = 'CREDIT' | 'DEBIT' | 'SETTLEMENT' | 'CHARGE' | 'FEE';
+const REVERSIBLE: ReadonlySet<RefKind> = new Set(['CREDIT', 'DEBIT', 'SETTLEMENT', 'CHARGE']);
+const RETURNABLE: ReadonlySet<RefKind> = new Set(['DEBIT', 'SETTLEMENT']);
+const REFUNDABLE: ReadonlySet<RefKind> = new Set(['DEBIT', 'SETTLEMENT', 'FEE', 'CHARGE']);
+const OPPOSITE: Readonly<Record<Direction, Direction>> = { DEBIT: 'CREDIT', CREDIT: 'DEBIT' };
 
 /**
  * Narrations are built with template literals, which V8 stores as rope
@@ -46,9 +51,9 @@ const OPPOSITE = { DEBIT: 'CREDIT', CREDIT: 'DEBIT' };
  * for 200k narrations) and dominated GC time. Slicing a prefixed copy forces
  * one flat string. See WORKLOG 17:5x.
  */
-const flat = (s) => (' ' + s).slice(1);
+const flat = (s: string): string => (' ' + s).slice(1);
 
-function partyText(p) {
+export function partyText(p: Party | null | undefined): string {
   if (!p) return 'unspecified counterparty';
   const bits = [p.accountName, p.bankName].filter(Boolean).join(', ');
   return `${p.accountNumber ?? p.iban ?? '?'}${bits ? ` (${bits})` : ''}`;
@@ -60,8 +65,24 @@ function partyText(p) {
  * there is one per posting, and at 1M events the shape and size matter
  * (see WORKLOG 17:5x).
  */
+interface VatRef { entryId: string; amount: number; refunded: number }
+
 class Ref {
-  constructor(id, kind, direction, amount, valueDate, postingDate, parts, counterparty, transferId, vat) {
+  id: string;
+  kind: RefKind;
+  direction: Direction;
+  amount: number;
+  valueDate: number;
+  postingDate: number;
+  parts: number[] | null;
+  counterparty: Party | null;
+  transferId: string | null;
+  vat: VatRef | null;
+  consumed: number;
+  reversedBy: string | null;
+
+  constructor(id: string, kind: RefKind, direction: Direction, amount: number, valueDate: number, postingDate: number,
+    parts: number[] | null, counterparty: Party | null, transferId: string | null, vat: VatRef | null) {
     this.id = id;
     this.kind = kind;
     this.direction = direction;
@@ -75,13 +96,31 @@ class Ref {
     this.consumed = 0;
     this.reversedBy = null;
   }
-  get partCount() { return this.parts ? this.parts.length : 1; }
-  part(i) { return this.parts ? this.parts[i] : this.amount; }
-  entryId(i) { return this.parts ? `${this.id}#${i + 1}` : this.id; }
+  get partCount(): number { return this.parts ? this.parts.length : 1; }
+  part(i: number): number { return this.parts ? this.parts[i] : this.amount; }
+  entryId(i: number): string { return this.parts ? `${this.id}#${i + 1}` : this.id; }
 }
 
 class Account {
-  constructor(id, currency, openingMinor, lastDay, party) {
+  id: string;
+  currency: string;
+  party: Party;
+  L: number;
+  s: Float64Array;
+  book: number;
+  holds: number;
+  closedThrough: number;
+  dirtyFrom: number;
+  dirtyBy: string[] | null;
+  ids: Map<string, number | Ref> | null;
+  auths: Map<string, Authorization> | null;
+  accrualSum: number;
+  accrualRecords: number;
+  accrualAdjustments: number;
+  capitalized: number | null;
+  today: JournalEntry[] | null;
+
+  constructor(id: string, currency: string, openingMinor: number, lastDay: number, party: Party) {
     this.id = id;
     this.currency = currency;
     this.party = party; // frozen own-side block, shared by every entry of this account
@@ -103,20 +142,77 @@ class Account {
     this.capitalized = null;
     this.today = null;               // journal entries processed since last close (detail only)
   }
-  g(f, d) { return this.s[f * this.L + d]; }
-  p(f, d, v) { this.s[f * this.L + d] = v; }
+  g(f: number, d: number): number { return this.s[f * this.L + d]; }
+  p(f: number, d: number, v: number): void { this.s[f * this.L + d] = v; }
 }
 
-class LedgerShard {
-  /**
-   * @param {object} o
-   * @param {Array<{id,currency,openingBalance,accountName?,bankName?,bic?,iban?}>} o.accounts
-   * @param {object} [o.policy]
-   * @param {boolean} [o.detail] keep per-account detail for reports
-   * @param {number} [o.errorSampleLimit]
-   * @param {boolean} [o.retainJournal] keep full journal in memory (default true)
-   */
-  constructor({ accounts, policy = DEFAULT_POLICY, detail = true, errorSampleLimit = Infinity, retainJournal = true }) {
+export interface LedgerShardOptions {
+  accounts: AccountConfig[];
+  policy?: Policy;
+  /** keep per-account detail for reports */
+  detail?: boolean;
+  errorSampleLimit?: number;
+  /** keep full journal in memory (default true) */
+  retainJournal?: boolean;
+}
+
+/** Point-in-time view of one account's derived state (for queries such as the HTTP ledger). */
+export interface AccountSnapshot {
+  account: string;
+  currency: string;
+  party: Party;
+  opening: number;
+  book: number;
+  holds: number;
+  available: number;
+  closedThrough: number;
+  accrualSum: number;
+  capitalized: number | null;
+  valueDayBalances: number[];
+  auths: Authorization[];
+}
+
+/** Input to _post: everything a ledger entry needs except what the shard derives. */
+interface PostSpec {
+  entryId: string;
+  eventId: string | null;
+  kind: EntryKind;
+  direction: Direction;
+  amount: number;
+  postingDate: number;
+  valueDate: number;
+  refersTo?: string;
+  authId?: string | null;
+  instalment?: string;
+  transferId?: string | null;
+  counterparty?: Party | null;
+  story: string;
+}
+
+interface Dispatched { outcome: string; narration: string }
+
+export class LedgerShard {
+  readonly policy: Policy;
+  readonly detail: boolean;
+  readonly errorSampleLimit: number;
+  readonly retainJournal: boolean;
+  readonly firstDay: number;
+  readonly lastDay: number;
+  openDay: number;
+  windowClosed: boolean;
+  readonly accounts: Map<string, Account>;
+  readonly feeMinor: Record<string, number>;
+  readonly eventLog: EventLogRecord[];
+  readonly journal: JournalEntry[];
+  readonly accruals: AccrualRecord[];
+  journalCount: number;
+  errors!: ErrorSample[];
+  errorCounts!: Record<string, number>;
+  errorTotal!: number;
+  notices!: Notice[];
+  stats!: DayStats;
+
+  constructor({ accounts, policy = DEFAULT_POLICY, detail = true, errorSampleLimit = Infinity, retainJournal = true }: LedgerShardOptions) {
     this.policy = policy;
     this.detail = detail;
     this.errorSampleLimit = errorSampleLimit;
@@ -144,15 +240,15 @@ class LedgerShard {
     this._resetDay();
   }
 
-  _resetDay() {
+  _resetDay(): void {
     this.errors = [];
-    this.errorCounts = Object.create(null);
+    this.errorCounts = Object.create(null) as Record<string, number>;
     this.errorTotal = 0;
     this.notices = [];
     this.stats = { accepted: 0, rejected: 0 };
   }
 
-  _fmt(acct, minor) { return `${acct.currency} ${money.format(minor, acct.currency)}`; }
+  _fmt(acct: Account, minor: number): string { return `${acct.currency} ${money.format(minor, acct.currency)}`; }
 
   // ───────────────────────────── inbound events ─────────────────────────────
 
@@ -162,13 +258,16 @@ class LedgerShard {
    * re-thrown so the replay stops (fail-stop) rather than continuing on state
    * that may be inconsistent.
    */
-  apply(raw, seq) {
+  apply(input: unknown, seq: number): ApplyResult {
+    const raw = (input !== null && typeof input === 'object' ? input : null) as Record<string, unknown> | null;
     const rawId = raw && typeof raw.id === 'string' ? raw.id : null;
     const rawAcct = raw && typeof raw.account === 'string' ? raw.account : null;
-    let evt = null;
+    const rawType = raw && typeof raw.type === 'string' ? raw.type : null;
+    const rawDay = raw ? raw.day : undefined;
+    let evt: NormalizedEvent | null = null;
     try {
       if (this.windowClosed) throw new LedgerError(CODES.WINDOW_CLOSED, 'window has closed; capitalization done');
-      evt = normalizeEvent(raw, this.policy);
+      evt = normalizeEvent(input, this.policy);
       if (evt.day < this.firstDay || evt.day > this.lastDay) {
         throw new LedgerError(CODES.OUT_OF_WINDOW, `day ${evt.day} outside window ${this.firstDay}..${this.lastDay}`);
       }
@@ -202,18 +301,18 @@ class LedgerShard {
       return { status: 'ACCEPTED', outcome, narration };
     } catch (e) {
       if (!(e instanceof LedgerError)) {
-        this._reject(seq, rawId, raw && raw.type, rawAcct, raw && raw.day, CODES.INTERNAL_ERROR, String(e && e.message));
+        this._reject(seq, rawId, rawType, rawAcct, rawDay, CODES.INTERNAL_ERROR, String(e instanceof Error ? e.message : e));
         throw e;
       }
-      this._reject(seq, rawId, evt ? evt.type : raw && raw.type, rawAcct, evt ? evt.day : raw && raw.day, e.code, e.message);
+      this._reject(seq, rawId, evt ? evt.type : rawType, rawAcct, evt ? evt.day : rawDay, e.code, e.message);
       return { status: 'REJECTED', code: e.code, message: e.message };
     }
   }
 
   /** Record an error that happened before the event reached a shard (e.g. malformed JSON). */
-  rejectRaw(seq, code, message) { this._reject(seq, null, null, null, null, code, message); }
+  rejectRaw(seq: number, code: string, message: string): void { this._reject(seq, null, null, null, null, code, message); }
 
-  _checkValueDate(evt) {
+  _checkValueDate(evt: NormalizedEvent): void {
     if (evt.valueDate < this.firstDay) {
       throw new LedgerError(CODES.VALUE_DATE_TOO_OLD, `value date D${evt.valueDate} before window start`);
     }
@@ -226,7 +325,7 @@ class LedgerShard {
     }
   }
 
-  _dispatch(evt, acct, seq) {
+  _dispatch(evt: NormalizedEvent, acct: Account, seq: number): Dispatched {
     switch (evt.type) {
       case 'CREDIT':
       case 'DEBIT': return this._plain(evt, acct);
@@ -236,26 +335,26 @@ class LedgerShard {
       case 'REVERSAL': return this._reverse(evt, acct);
       case 'RETURN':
       case 'REFUND': return this._refund(evt, acct);
-      default: throw new InvariantError(`unhandled type ${evt.type}`);
+      default: throw new InvariantError(`unhandled type ${(evt as NormalizedEvent).type}`);
     }
   }
 
-  _amount(evt, acct) {
+  _amount(evt: NormalizedEvent, acct: Account): number {
     const m = money.parseAmount(evt.amount, acct.currency);
     if (m === 0) throw new LedgerError(CODES.INVALID_AMOUNT, 'amount must be greater than zero');
     return m;
   }
 
   /** Pre-flight: make sure applying `signed` to the account cannot overflow. */
-  _canPost(acct, valueDay, signed) {
+  _canPost(acct: Account, valueDay: number, signed: number): void {
     money.safe(acct.book + signed);
     money.safe(acct.g(F_DELTA, valueDay) + signed);
   }
 
-  _plain(evt, acct) {
+  _plain(evt: NormalizedEvent, acct: Account): Dispatched {
     const total = this._amount(evt, acct);
     const parts = evt.instalments > 1 ? money.allocateEqual(total, evt.instalments) : [total];
-    const direction = evt.type; // CREDIT | DEBIT
+    const direction = evt.type as Direction; // CREDIT | DEBIT
     this._canPost(acct, evt.valueDate, direction === 'CREDIT' ? total : -total);
     const label = direction === 'CREDIT' ? 'Credit' : 'Debit';
     const xfer = evt.transferId ? ` [transfer ${evt.transferId}]` : '';
@@ -264,11 +363,11 @@ class LedgerShard {
       const story = parts.length > 1
         ? `${label} ${evt.id} instalment ${i + 1}/${parts.length} of ${this._fmt(acct, total)}${xfer}`
         : `${label} ${evt.id}${xfer}`;
-      return this._post(acct, { entryId, eventId: evt.id, kind: evt.type, direction, amount: amt,
+      return this._post(acct, { entryId, eventId: evt.id, kind: direction, direction, amount: amt,
         postingDate: evt.day, valueDate: evt.valueDate, counterparty: evt.counterparty, transferId: evt.transferId,
         instalment: parts.length > 1 ? `${i + 1}/${parts.length}` : undefined, story });
     });
-    this._refer(acct, new Ref(evt.id, evt.type, direction, total, evt.valueDate, evt.day, parts.length > 1 ? parts : null,
+    this._refer(acct, new Ref(evt.id, direction, direction, total, evt.valueDate, evt.day, parts.length > 1 ? parts : null,
       evt.counterparty, evt.transferId, null));
     return {
       outcome: parts.length > 1 ? `POSTED_IN_${parts.length}_INSTALMENTS` : 'POSTED',
@@ -279,20 +378,20 @@ class LedgerShard {
     };
   }
 
-  _vatBps(acct) { return (this.policy.vatBps && this.policy.vatBps[acct.currency]) || 0; }
-  _vatOn(acct, chargeMinor) {
+  _vatBps(acct: Account): number { return (this.policy.vatBps && this.policy.vatBps[acct.currency]) || 0; }
+  _vatOn(acct: Account, chargeMinor: number): number {
     const bps = this._vatBps(acct);
     return bps === 0 ? 0 : money.divRoundHalfEven(money.safe(chargeMinor * bps), 10_000);
   }
 
-  _charge(evt, acct) {
+  _charge(evt: NormalizedEvent, acct: Account): Dispatched {
     const amt = this._amount(evt, acct);
     const vat = this._vatOn(acct, amt);
     this._canPost(acct, evt.valueDate, -(amt + vat));
     const chargeParty = evt.counterparty ?? this.policy.bank.gl.CHARGE_INCOME;
     const e = this._post(acct, { entryId: evt.id, eventId: evt.id, kind: 'CHARGE', direction: 'DEBIT', amount: amt,
       postingDate: evt.day, valueDate: evt.valueDate, counterparty: chargeParty, story: `Service charge ${evt.id}` });
-    let vatRef = null;
+    let vatRef: VatRef | null = null;
     let narration = e.narration;
     if (vat > 0) {  // (joined below with +=, flattened at the end)
       vatRef = { entryId: `VAT:${evt.id}`, amount: vat, refunded: 0 };
@@ -305,23 +404,24 @@ class LedgerShard {
     return { outcome: vat > 0 ? 'POSTED_WITH_VAT' : 'POSTED', narration: vat > 0 ? flat(narration) : narration };
   }
 
-  _authorize(evt, acct, seq) {
+  _authorize(evt: NormalizedEvent, acct: Account, seq: number): Dispatched {
     const amt = this._amount(evt, acct);
     if (acct.auths === null) acct.auths = new Map();
-    if (acct.auths.has(evt.authId)) {
+    const authId = evt.authId!;
+    if (acct.auths.has(authId)) {
       throw new LedgerError(CODES.DUPLICATE_AUTH_ID, `authorization ${evt.authId} already exists on ${acct.id}`);
     }
     const availableBefore = money.safe(acct.book - acct.holds);
     const availableAfter = money.safe(availableBefore - amt);
     const approved = availableAfter >= 0;
-    const auth = {
-      authId: evt.authId, eventId: evt.id, seq, amount: amt, requestedDay: evt.day, valueDate: evt.valueDate,
+    const auth: Authorization = {
+      authId, eventId: evt.id, seq, amount: amt, requestedDay: evt.day, valueDate: evt.valueDate,
       state: approved ? 'APPROVED' : 'DECLINED', availableAfter,
       settledAmount: 0, releasedAmount: 0, settledBy: null, history: [], counterparty: evt.counterparty,
     };
     auth.history.push(Object.freeze({ day: this.openDay, state: auth.state, eventId: evt.id }));
     if (approved) acct.holds = money.safe(acct.holds + amt);
-    acct.auths.set(evt.authId, auth);
+    acct.auths.set(authId, auth);
     const narration = flat(`Authorization ${evt.authId} (${evt.id}) for ${this._fmt(acct, amt)} on ${partyText(acct.party)}`
       + ` payable to ${partyText(evt.counterparty)}: ledger ${this._fmt(acct, acct.book)} − active holds `
       + `${this._fmt(acct, approved ? acct.holds - amt : acct.holds)} − this hold ${this._fmt(acct, amt)} = available `
@@ -330,9 +430,9 @@ class LedgerShard {
     return { outcome: approved ? 'AUTH_APPROVED' : 'AUTH_DECLINED', narration };
   }
 
-  _settle(evt, acct) {
+  _settle(evt: NormalizedEvent, acct: Account): Dispatched {
     const amt = this._amount(evt, acct);
-    const auth = acct.auths && acct.auths.get(evt.authId);
+    const auth = acct.auths && acct.auths.get(evt.authId!);
     if (!auth) {
       throw new LedgerError(CODES.SETTLEMENT_UNKNOWN_AUTH,
         `settlement ${evt.id} references ${evt.authId}, which has no authorization on ${acct.id}; no funds moved`);
@@ -365,8 +465,8 @@ class LedgerShard {
     return { outcome: released > 0 ? 'SETTLED_PARTIAL_HOLD_RELEASED' : 'SETTLED', narration: e.narration };
   }
 
-  _target(evt, acct, allowed) {
-    const t = acct.ids && acct.ids.get(evt.ref);
+  _target(evt: NormalizedEvent, acct: Account, allowed: ReadonlySet<RefKind>): Ref {
+    const t = acct.ids && acct.ids.get(evt.ref!);
     if (!(t instanceof Ref)) throw new LedgerError(CODES.REFERENCE_NOT_FOUND, `${evt.ref} not found on ${acct.id}`);
     if (!allowed.has(t.kind)) {
       throw new LedgerError(CODES.REFERENCE_NOT_ELIGIBLE, `${evt.type} cannot target a ${t.kind} (${evt.ref})`);
@@ -379,12 +479,12 @@ class LedgerShard {
     return t;
   }
 
-  _origText(acct, t) {
+  _origText(acct: Account, t: Ref): string {
     return `${t.direction} ${this._fmt(acct, t.amount)}, posted D${t.postingDate}, value D${t.valueDate}`;
   }
 
   /** Full reversal: one opposite-direction entry per original entry. The original is untouched. */
-  _reverse(evt, acct) {
+  _reverse(evt: NormalizedEvent, acct: Account): Dispatched {
     const t = this._target(evt, acct, REVERSIBLE);
     if (t.consumed > 0) {
       throw new LedgerError(CODES.REVERSAL_AFTER_PARTIAL_REFUND,
@@ -396,7 +496,7 @@ class LedgerShard {
     const dir = OPPOSITE[t.direction];
     const vatAmt = t.vat ? t.vat.amount - t.vat.refunded : 0;
     this._canPost(acct, evt.valueDate, (dir === 'CREDIT' ? 1 : -1) * t.amount + vatAmt);
-    const narr = [];
+    const narr: string[] = [];
     for (let i = 0; i < t.partCount; i++) {
       const e = this._post(acct, { entryId: t.parts ? `${evt.id}#${i + 1}` : evt.id, eventId: evt.id,
         kind: 'REVERSAL', direction: dir, amount: t.part(i), postingDate: evt.day, valueDate: evt.valueDate,
@@ -406,10 +506,10 @@ class LedgerShard {
     }
     if (vatAmt > 0) {
       const e = this._post(acct, { entryId: `VAT:${evt.id}`, eventId: evt.id, kind: 'VAT_REVERSAL', direction: 'CREDIT',
-        amount: vatAmt, postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.vat.entryId,
-        counterparty: this.policy.bank.gl.VAT_PAYABLE, story: `VAT reversal ${evt.id} of ${t.vat.entryId}` });
+        amount: vatAmt, postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.vat!.entryId,
+        counterparty: this.policy.bank.gl.VAT_PAYABLE, story: `VAT reversal ${evt.id} of ${t.vat!.entryId}` });
       narr.push(e.narration);
-      t.vat.refunded += vatAmt;
+      t.vat!.refunded += vatAmt;
     }
     t.reversedBy = evt.id;
     t.consumed = t.amount;
@@ -417,7 +517,7 @@ class LedgerShard {
   }
 
   /** RETURN (merchandise) or REFUND (any debit incl. fees/charges): separate credit entries, partial allowed. */
-  _refund(evt, acct) {
+  _refund(evt: NormalizedEvent, acct: Account): Dispatched {
     const t = this._target(evt, acct, evt.type === 'RETURN' ? RETURNABLE : REFUNDABLE);
     const remaining = t.amount - t.consumed;
     const amt = evt.amount === null ? remaining : this._amount(evt, acct);
@@ -434,8 +534,8 @@ class LedgerShard {
     this._canPost(acct, evt.valueDate, amt + vatBack);
     const label = evt.type === 'RETURN' ? 'Return' : 'Refund';
     const left = remaining - amt;
-    const narr = [];
-    const e = this._post(acct, { entryId: evt.id, eventId: evt.id, kind: evt.type, direction: 'CREDIT', amount: amt,
+    const narr: string[] = [];
+    const e = this._post(acct, { entryId: evt.id, eventId: evt.id, kind: evt.type as 'RETURN' | 'REFUND', direction: 'CREDIT', amount: amt,
       postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.entryId(0), counterparty: t.counterparty,
       transferId: t.transferId,
       story: `${label} ${evt.id} against ${t.kind} ${t.entryId(0)} (original ${this._origText(acct, t)}); `
@@ -443,22 +543,22 @@ class LedgerShard {
     narr.push(e.narration);
     if (vatBack > 0) {
       const v = this._post(acct, { entryId: `VAT:${evt.id}`, eventId: evt.id, kind: 'VAT_REFUND', direction: 'CREDIT',
-        amount: vatBack, postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.vat.entryId,
-        counterparty: this.policy.bank.gl.VAT_PAYABLE, story: `VAT refund ${evt.id} on ${t.vat.entryId}, separate entry` });
+        amount: vatBack, postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.vat!.entryId,
+        counterparty: this.policy.bank.gl.VAT_PAYABLE, story: `VAT refund ${evt.id} on ${t.vat!.entryId}, separate entry` });
       narr.push(v.narration);
-      t.vat.refunded += vatBack;
+      t.vat!.refunded += vatBack;
     }
     t.consumed += amt;
     return { outcome: t.consumed === t.amount ? `${evt.type}_FULL` : `${evt.type}_PARTIAL`, narration: narr.join(' | ') };
   }
 
-  _refer(acct, ref) {
+  _refer(acct: Account, ref: Ref): void {
     if (acct.ids === null) acct.ids = new Map();
     acct.ids.set(ref.id, ref);
   }
 
   /** The only place a ledger entry is created. */
-  _post(acct, e) {
+  _post(acct: Account, e: PostSpec): JournalEntry {
     const signed = e.direction === 'CREDIT' ? e.amount : -e.amount;
     if (!(e.amount > 0)) throw new InvariantError(`non-positive entry amount ${e.amount}`);
     const from = e.direction === 'CREDIT' ? (e.counterparty ?? null) : acct.party;
@@ -467,7 +567,7 @@ class LedgerShard {
     const narration = flat(`${e.story}; ${e.direction} ${this._fmt(acct, e.amount)} from ${partyText(from)} to ${partyText(to)}`
       + `; posted D${e.postingDate}, value D${e.valueDate}${back > 0 ? ` (back-valued ${back} day${back > 1 ? 's' : ''})` : ''}`
       + `${this.openDay > e.postingDate ? `; arrived late, processed D${this.openDay}` : ''}`);
-    const entry = Object.freeze({
+    const entry: JournalEntry = Object.freeze({
       entryId: e.entryId,
       eventId: e.eventId ?? null,
       account: acct.id,
@@ -498,15 +598,17 @@ class LedgerShard {
     return entry;
   }
 
-  _log(seq, eventId, type, account, postingDate, status, code, outcome, narration) {
+  _log(seq: number | null, eventId: string | null, type: string | null, account: string | null, postingDate: number | null,
+    status: 'ACCEPTED' | 'REJECTED', code: string | null, outcome: string | null, narration: string): void {
     this.eventLog.push(Object.freeze({ seq, eventId, type: type ?? null, account, postingDate: postingDate ?? null,
       processedOnDay: this.openDay, status, code, outcome, narration }));
   }
 
-  _reject(seq, eventId, type, account, day, code, message) {
+  _reject(seq: number | null, eventId: string | null, type: string | null, account: string | null, day: unknown,
+    code: string, message: string): void {
     const narration = flat(`${type ?? 'Event'} ${eventId ?? '(no id)'}${account ? ` on ${account}` : ''} REJECTED `
       + `(${code}): ${message}; ledger unchanged; processed D${this.openDay}`);
-    this._log(seq, eventId, type, account, Number.isSafeInteger(day) ? day : null, 'REJECTED', code, null, narration);
+    this._log(seq, eventId, type, account, Number.isSafeInteger(day) ? day as number : null, 'REJECTED', code, null, narration);
     this.stats.rejected++;
     this.errorTotal++;
     this.errorCounts[code] = (this.errorCounts[code] || 0) + 1;
@@ -528,21 +630,21 @@ class LedgerShard {
    *     post an adjusting accrual record for the difference. Nothing is overwritten.
    *  3. On the capitalization day, credit Σ accrual records as one INTEREST entry.
    */
-  closeDay(D) {
+  closeDay(D: number): DayReport {
     if (this.windowClosed) throw new InvariantError('closeDay after window closed');
     if (D !== this.openDay) throw new InvariantError(`closeDay(${D}) but open day is ${this.openDay}`);
     const { num: rNum, den: rDen } = this.policy.interestRate;
     const capDay = this.policy.capitalizeOnDay;
     const gl = this.policy.bank.gl;
-    const totals = Object.create(null);
-    const accountsOut = this.detail ? [] : null;
+    const totals = Object.create(null) as Record<string, CurrencyTotals>;
+    const accountsOut: AccountDayReport[] | null = this.detail ? [] : null;
 
     for (const acct of this.accounts.values()) {
       const start = Math.min(acct.dirtyFrom, D);
       const trigger = acct.dirtyBy ? [...new Set(acct.dirtyBy)].join(', ') : null;
-      const fees = [];
-      const accr = [];
-      const restated = [];
+      const fees: FeeAssessment[] = [];
+      const accr: AccrualView[] = [];
+      const restated: Restatement[] = [];
       let running = acct.g(F_CLOSING, start - 1);
 
       for (let v = start; v <= D; v++) {
@@ -565,7 +667,7 @@ class LedgerShard {
             this._post(acct, { entryId: feeId, eventId: null, kind: 'FEE', direction: 'DEBIT', amount: fee,
               postingDate: D, valueDate: v, counterparty: gl.FEE_INCOME,
               story: `Overdraft fee for value D${v}: D${v} closing balance ${this._fmt(acct, running)} ${why}` });
-            let vatRef = null;
+            let vatRef: VatRef | null = null;
             if (vat > 0) {
               vatRef = { entryId: `VAT:${feeId}`, amount: vat, refunded: 0 };
               this._post(acct, { entryId: vatRef.entryId, eventId: null, kind: 'VAT', direction: 'DEBIT', amount: vat,
@@ -592,7 +694,7 @@ class LedgerShard {
         if (target !== posted) {
           const diff = target - posted;
           const isAdj = v <= acct.closedThrough;
-          const rec = Object.freeze({
+          const rec: AccrualRecord = Object.freeze({
             accrualId: `ACR:${acct.id}:D${v}:${acct.accrualRecords + 1}`, account: acct.id, currency: acct.currency,
             valueDate: v, postingDate: D, amount: diff,
             kind: isAdj ? 'ACCRUAL_ADJUSTMENT' : 'ACCRUAL',
@@ -623,7 +725,7 @@ class LedgerShard {
         throw new InvariantError(`accrual drift on ${acct.id}: days ${accruedToDate} vs records ${acct.accrualSum}`);
       }
 
-      let capitalized = null;
+      let capitalized: number | null = null;
       if (D === capDay) {
         capitalized = acct.accrualSum;
         if (capitalized > 0) {
@@ -653,14 +755,14 @@ class LedgerShard {
       t.holds += acct.holds;
 
       if (this.detail) {
-        const auths = [];
+        const auths: AuthView[] = [];
         for (const a of (acct.auths ? acct.auths.values() : [])) {
           auths.push({ authId: a.authId, eventId: a.eventId, state: a.state, amount: a.amount,
             requestedDay: a.requestedDay, availableAfter: a.availableAfter, settledAmount: a.settledAmount,
             releasedAmount: a.releasedAmount, settledBy: a.settledBy,
             changedToday: a.history.some((h) => h.day === D) });
         }
-        accountsOut.push({
+        accountsOut!.push({
           account: acct.id, currency: acct.currency, party: acct.party, opening: acct.g(F_DELTA, 0), closing,
           preCapitalization: capitalized ? closing - capitalized : null,
           holds: acct.holds, available: money.safe(acct.book - acct.holds),
@@ -672,7 +774,7 @@ class LedgerShard {
       acct.today = null;
     }
 
-    const report = {
+    const report: DayReport = {
       day: D,
       accounts: accountsOut,
       totals,
@@ -691,10 +793,10 @@ class LedgerShard {
   // ──────────────────────────────── queries ─────────────────────────────────
 
   /** Closing ledger balance of value day v as currently known (after fees). */
-  closingBalance(accountId, v) { return this._acct(accountId).g(F_CLOSING, v); }
+  closingBalance(accountId: string, v: number): number { return this._acct(accountId).g(F_CLOSING, v); }
 
   /** Balance of value day v recomputed from the journal alone (audit path; optionally excluding kinds). */
-  balanceFromJournal(accountId, v, { excludeKinds = [] } = {}) {
+  balanceFromJournal(accountId: string, v: number, { excludeKinds = [] }: { excludeKinds?: string[] } = {}): number {
     const acct = this._acct(accountId);
     let b = acct.g(F_DELTA, 0);
     const ex = new Set(excludeKinds);
@@ -705,20 +807,32 @@ class LedgerShard {
     return b;
   }
 
-  available(accountId) { const a = this._acct(accountId); return a.book - a.holds; }
-  bookBalance(accountId) { return this._acct(accountId).book; }
-  auth(accountId, authId) {
+  available(accountId: string): number { const a = this._acct(accountId); return a.book - a.holds; }
+  bookBalance(accountId: string): number { return this._acct(accountId).book; }
+  auth(accountId: string, authId: string): Authorization | null {
     const auths = this._acct(accountId).auths;
     const a = auths && auths.get(authId);
     return a ? { ...a, history: [...a.history] } : null;
   }
-  accrualSum(accountId) { return this._acct(accountId).accrualSum; }
+  accrualSum(accountId: string): number { return this._acct(accountId).accrualSum; }
+  hasAccount(accountId: string): boolean { return this.accounts.has(accountId); }
 
-  _acct(id) {
+  /** Derived state of one account as currently known. Value-day balances cover the closed days only. */
+  snapshot(accountId: string): AccountSnapshot {
+    const a = this._acct(accountId);
+    return {
+      account: a.id, currency: a.currency, party: a.party, opening: a.g(F_DELTA, 0), book: a.book, holds: a.holds,
+      available: money.safe(a.book - a.holds), closedThrough: a.closedThrough, accrualSum: a.accrualSum,
+      capitalized: a.capitalized,
+      valueDayBalances: Array.from({ length: a.closedThrough }, (_, i) => a.g(F_CLOSING, i + 1)),
+      auths: a.auths ? [...a.auths.values()].map((x) => ({ ...x, history: [...x.history] })) : [],
+    };
+  }
+
+  _acct(id: string): Account {
     const a = this.accounts.get(id);
     if (!a) throw new LedgerError(CODES.UNKNOWN_ACCOUNT, `unknown account ${id}`);
     return a;
   }
 }
 
-module.exports = { LedgerShard, partyText };

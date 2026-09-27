@@ -1,19 +1,19 @@
-'use strict';
 /**
  * Determinism across execution modes: the same stream must produce identical
  * day reports whether it runs in-process or across N worker shards.
  */
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { execFileSync } = require('node:child_process');
-const { SCENARIO, ACCOUNTS, ROOT, runSharded } = require('../helpers');
-const { replay, inProcess } = require('../../src/replay');
-const { fnv1a } = require('../../src/sharded');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { SCENARIO, ACCOUNTS, DIST, runSharded } from '../helpers';
+import { replay, inProcess, type ReplaySource } from '../../src/replay';
+import { fnv1a } from '../../src/sharded';
+import type { AccountConfig } from '../../src/types';
 
-async function inProc(source, accounts, detail) {
+async function inProc(source: ReplaySource, accounts: AccountConfig[], detail: boolean) {
   const engine = inProcess(accounts, { detail, errorSampleLimit: Infinity });
   return (await replay({ source, engine })).reports;
 }
@@ -27,7 +27,7 @@ test('scenario: in-process ≡ 2 shards ≡ 3 shards (full detail)', async () =>
 
 test('synthetic 20k-event stream with every awkward case: in-process ≡ 2 shards', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-'));
-  execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'gen-load.js'), '--accounts', '300', '--events', '20000', '--out', dir, '--seed', '7'],
+  execFileSync(process.execPath, [path.join(DIST, 'scripts', 'gen-load.js'), '--accounts', '300', '--events', '20000', '--out', dir, '--seed', '7'],
     { stdio: 'ignore' });
   const accounts = JSON.parse(fs.readFileSync(path.join(dir, 'accounts.json'), 'utf8'));
   const src = path.join(dir, 'events.ndjson');
@@ -46,7 +46,7 @@ test('routing hash is stable (a changed hash would silently re-partition account
 });
 
 test('CLI replay exits 0 and prints the four required things per day', () => {
-  const out = execFileSync(process.execPath, [path.join(ROOT, 'bin', 'replay.js')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const out = execFileSync(process.execPath, [path.join(DIST, 'bin', 'replay.js')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   for (let d = 1; d <= 6; d++) assert.match(out, new RegExp(`DAY ${d} CLOSE`));
   assert.match(out, /Closing ledger balance D6: 390\.92/);
   assert.match(out, /FEE:ACC-001:D2 {2}DEBIT 25\.00/);
@@ -55,7 +55,9 @@ test('CLI replay exits 0 and prints the four required things per day', () => {
 });
 
 test('CLI: unreadable input is a fatal exit 1; bad flags are exit 2', () => {
-  const run = (args) => { try { execFileSync(process.execPath, [path.join(ROOT, 'bin', 'replay.js'), ...args], { stdio: 'ignore' }); return 0; } catch (e) { return e.status; } };
+  const run = (args: string[]) => {
+    try { execFileSync(process.execPath, [path.join(DIST, 'bin', 'replay.js'), ...args], { stdio: 'ignore' }); return 0; } catch (e) { return (e as { status: number }).status; }
+  };
   assert.equal(run(['/nonexistent.ndjson']), 1);
   assert.equal(run(['--bogus']), 2);
   assert.equal(run(['--shards', '-1']), 2);

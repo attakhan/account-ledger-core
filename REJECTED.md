@@ -4,7 +4,7 @@ This file has two parts:
 - **Part 1** lists the acceptance criteria I refused, with the reasoning.
 - **Part 2** lists the approaches I abandoned during the build.
 
-Every verdict in Part 1 is also an executable test in `test/scenario/acceptance.test.js`. Accepted
+Every verdict in Part 1 is also an executable test in `test/scenario/acceptance.test.ts`. Accepted
 criteria are asserted as written. Rejected criteria are asserted to be false, and the test pins the
 value that actually happens.
 
@@ -133,7 +133,7 @@ this scenario it only ever applies to Auth-A.
 ## Part 2 — Approaches abandoned mid-build
 
 1. **BigInt for all money.** This was the first plan.
-   - Measured before writing the engine (`scripts/bench-numeric.js`): BigInt was about 2× slower in the hot
+   - Measured before writing the engine (`scripts/bench-numeric.ts`): BigInt was about 2× slower in the hot
      loop. Its memory was about the same as separate typed arrays, but 8× worse than one packed
      Float64Array per account.
    - Replaced by safe-integer Numbers, with an `isSafeInteger` guard on every operation and

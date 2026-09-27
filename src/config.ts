@@ -1,10 +1,11 @@
-'use strict';
 /**
  * Every tunable in one place. NUMBERS.md explains each value, why it was
  * chosen, and why it is not half that value. Business constants are strings
  * or integer rationals and are never floats.
  */
-const DEFAULT_POLICY = Object.freeze({
+import type { Policy } from './types';
+
+export const DEFAULT_POLICY: Policy = Object.freeze({
   window: Object.freeze({ firstDay: 1, lastDay: 6 }),
 
   // Overdraft fee per account currency. Only AED is specified. There is no FX
@@ -51,7 +52,7 @@ const DEFAULT_POLICY = Object.freeze({
   }),
 });
 
-const DEFAULT_RUNTIME = Object.freeze({
+export const DEFAULT_RUNTIME = Object.freeze({
   // Events per postMessage batch from the router to a shard worker.
   batchSize: 2_048,
   // Batches in flight per worker before the router pauses reading (backpressure).
@@ -60,6 +61,6 @@ const DEFAULT_RUNTIME = Object.freeze({
   detailAccountLimit: 50,
   // Individual error lines printed per day (counts per code are always complete).
   errorSampleLimit: 25,
+  // HTTP port for bin/serve.
+  httpPort: 3000,
 });
-
-module.exports = { DEFAULT_POLICY, DEFAULT_RUNTIME };

@@ -1,3 +1,5 @@
 node_modules/
 bench-out/
 *.log
+dist/
+data/events.ndjson

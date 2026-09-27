@@ -2,7 +2,7 @@
 
 This file lists every constant in the system, with where it comes from, why it has that value, and why
 it is not half that value. "Given" means the brief fixes the value and I only chose its representation.
-All constants live in `src/config.js`, apart from currency precisions (`src/money.js`) and constants
+All constants live in `src/config.ts`, apart from currency precisions (`src/money.ts`) and constants
 inside benchmark scripts.
 
 ---
@@ -57,7 +57,7 @@ capitalize 0.93 against an exact 0.918.
 | Item | Value | Why, and not half |
 |---|---|---|
 | Money type | JS Number holding integer minor units, guarded by `Number.isSafeInteger` | Measured against BigInt: 2× faster on the hot path. Safe up to 2^53−1 fils ≈ AED 90 trillion per account. Overflow raises `AMOUNT_OVERFLOW` before any state changes. |
-| Per-account state | one `Float64Array` of 6 fields × 7 slots (D0–D6) | One object per account instead of five: 37 MB vs 281 MB at 200k accounts in `scripts/bench-numeric.js`. |
+| Per-account state | one `Float64Array` of 6 fields × 7 slots (D0–D6) | One object per account instead of five: 37 MB vs 281 MB at 200k accounts in `scripts/bench-numeric.ts`. |
 
 ## 5. Runtime and throughput constants
 
