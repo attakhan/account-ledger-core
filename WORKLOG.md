@@ -70,3 +70,38 @@ The first end-to-end replay (in-process) gave exactly the numbers worked out at 
 - ACC-001 accrual records: D1 +10, D2 +10, D3 +26, D4 +19, then −10/−26/−19 at the D5 close, then
   +9/+25/+17/+15/+16 at the D6 close. That is 12 records summing to 92 = the capitalized 0.92.
 - E10 instalments are 3.334 / 3.333 / 3.333, with LATE_ARRIVAL, postingDate D5 and processedOnDay D6.
+
+### 2026-09-27 17:42 — sharded replayer and CLI
+- Added `ShardedEngine`: worker_threads, FNV-1a routing by account, batches of 2048, at most 8 batches in flight
+  per worker (backpressure), and day close as a barrier.
+- Scenario output is byte-identical for in-process, `--shards 2` and `--shards 3`.
+- The 50k synthetic stream differed between modes **only in the order of error-code keys** (insertion order
+  depends on the shard). The merge now sorts the keys, and the output is identical after that.
+
+### 2026-09-27 17:45–17:55 — performance: the first numbers were bad, and here is what fixed them
+The 1M events / 100k accounts synthetic stream on this 2-vCPU box first ran at **60,518 ev/s with 2.44 GB peak RSS**.
+The CPU profile of a 300k slice showed GC at about 40%. `LedgerError` construction was about 10%, because each
+one captured a stack.
+1. LedgerError no longer captures a stack (`Error.stackTraceLimit = 0` around `super`). A rejection has no
+   use for a stack.
+2. The replayer read with a readline `for await`, which cost one promise per line. It now reads line
+   *batches* per 64 KiB chunk and calls `engine.apply` synchronously (a promise only under backpressure).
+3. Heap probe: accounts took 102 MB for 100k, so the `seen`/`refs`/`auths` maps are now allocated lazily and
+   merged into a single `ids` map. Down to 46 MB.
+4. Spread-copied ref objects became a fixed-shape `Ref` class.
+5. **Narration strings.** The template-literal concatenation leaves V8 rope strings. A micro-test showed 200k
+   ropes at 354 MB against 55 MB flat. `(' ' + s).slice(1)` flattens a string (measured 61 MB, and faster).
+   Tried `charCodeAt` and `indexOf`, and neither flattened. Accepted narrations are also no longer copied a
+   second time into the event log.
+6. Sharded mode now ships the original line string to workers rather than the parsed object, so a
+   structured clone of a string replaces a clone of the object graph.
+
+After these changes, 1M events: in-process 77k ev/s / 1.66 GB (journal not retained) and 68.6k ev/s /
+1.98 GB (journal retained, the default). With `--shards 2`: 93k / 1.91 GB and 85.9k / 2.20 GB. The box has
+2 vCPUs, so main thread + 2 workers oversubscribe it, and the sharding gain here is modest. I did **not**
+measure more cores and don't claim a number for them.
+
+Memory is the real ceiling. Each event keeps an event-log record with a narration, a journal entry with
+from/to blocks and a narration, and a Ref. That is about 1.9 KB per event all-in at 1M. That cost follows
+from "in-memory, append-only, nothing deleted" plus the narration requirement. It is written up in
+AMBIGUITIES/README rather than hidden.

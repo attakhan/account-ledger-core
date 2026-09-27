@@ -36,7 +36,13 @@ const CODES = Object.freeze({
 
 class LedgerError extends Error {
   constructor(code, message, details) {
+    // Business rejections are expected at volume (orphan settlements, duplicates…).
+    // Capturing a stack for each one was ~10% of replay CPU in profiling, and the
+    // stack carries no information for a rejection, so it is skipped.
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = 0;
     super(message);
+    Error.stackTraceLimit = limit;
     this.name = 'LedgerError';
     this.code = code;
     if (details !== undefined) this.details = details;

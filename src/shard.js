@@ -39,10 +39,45 @@ const RETURNABLE = new Set(['DEBIT', 'SETTLEMENT']);
 const REFUNDABLE = new Set(['DEBIT', 'SETTLEMENT', 'FEE', 'CHARGE']);
 const OPPOSITE = { DEBIT: 'CREDIT', CREDIT: 'DEBIT' };
 
+/**
+ * Narrations are built with template literals, which V8 stores as rope
+ * ("cons") strings: a tree of every fragment. Retained by the hundred
+ * thousand, the ropes cost about 6× the flat text (measured: 354 MB vs 55 MB
+ * for 200k narrations) and dominated GC time. Slicing a prefixed copy forces
+ * one flat string. See WORKLOG 17:5x.
+ */
+const flat = (s) => (' ' + s).slice(1);
+
 function partyText(p) {
   if (!p) return 'unspecified counterparty';
   const bits = [p.accountName, p.bankName].filter(Boolean).join(', ');
   return `${p.accountNumber ?? p.iban ?? '?'}${bits ? ` (${bits})` : ''}`;
+}
+
+/**
+ * Tracking record for an entry that can later be reversed, returned or
+ * refunded. It is a fixed-shape class (not a spread object literal) because
+ * there is one per posting, and at 1M events the shape and size matter
+ * (see WORKLOG 17:5x).
+ */
+class Ref {
+  constructor(id, kind, direction, amount, valueDate, postingDate, parts, counterparty, transferId, vat) {
+    this.id = id;
+    this.kind = kind;
+    this.direction = direction;
+    this.amount = amount;
+    this.valueDate = valueDate;
+    this.postingDate = postingDate;
+    this.parts = parts;               // null unless split into instalments
+    this.counterparty = counterparty; // may be null
+    this.transferId = transferId;     // may be null
+    this.vat = vat;                   // null or { entryId, amount, refunded }
+    this.consumed = 0;
+    this.reversedBy = null;
+  }
+  get partCount() { return this.parts ? this.parts.length : 1; }
+  part(i) { return this.parts ? this.parts[i] : this.amount; }
+  entryId(i) { return this.parts ? `${this.id}#${i + 1}` : this.id; }
 }
 
 class Account {
@@ -60,14 +95,13 @@ class Account {
     this.closedThrough = 0;
     this.dirtyFrom = Infinity;       // earliest already-closed value day touched since last close
     this.dirtyBy = null;             // event ids that back-valued into closed days since last close
-    this.seen = new Map();           // eventId → seq (idempotency scope is the account)
-    this.refs = new Map();           // referable entry id → mutable tracking record
-    this.auths = new Map();          // authId → auth state
+    this.ids = null;                 // lazily: id → seq (seen) or Ref (referable). Idempotency scope = account
+    this.auths = null;               // lazily: authId → auth state
     this.accrualSum = 0;             // Σ accrual sub-ledger amounts
     this.accrualRecords = 0;
     this.accrualAdjustments = 0;
     this.capitalized = null;
-    this.today = [];                 // journal entries processed since last close (detail only)
+    this.today = null;               // journal entries processed since last close (detail only)
   }
   g(f, d) { return this.s[f * this.L + d]; }
   p(f, d, v) { this.s[f * this.L + d] = v; }
@@ -143,12 +177,13 @@ class LedgerShard {
       }
       const acct = this.accounts.get(evt.account);
       if (!acct) throw new LedgerError(CODES.UNKNOWN_ACCOUNT, `unknown account ${evt.account}`);
-      const firstSeq = acct.seen.get(evt.id);
-      if (firstSeq !== undefined) {
-        throw new LedgerError(CODES.DUPLICATE_EVENT,
-          `event ${evt.id} already received (seq ${firstSeq}); original postingDate is kept`);
+      if (acct.ids === null) acct.ids = new Map();
+      const prior = acct.ids.get(evt.id);
+      if (prior !== undefined) {
+        throw new LedgerError(CODES.DUPLICATE_EVENT, `event ${evt.id} already received`
+          + `${typeof prior === 'number' ? ` (seq ${prior})` : ` (posted D${prior.postingDate})`}; original postingDate is kept`);
       }
-      acct.seen.set(evt.id, seq); // reserved even if rejected below: an id names one fact forever
+      acct.ids.set(evt.id, seq); // reserved even if rejected below: an id names one fact forever
       if (evt.currency !== null && evt.currency !== acct.currency) {
         throw new LedgerError(CODES.CURRENCY_MISMATCH, `${evt.currency} event on ${acct.currency} account ${acct.id}`);
       }
@@ -222,12 +257,10 @@ class LedgerShard {
     const parts = evt.instalments > 1 ? money.allocateEqual(total, evt.instalments) : [total];
     const direction = evt.type; // CREDIT | DEBIT
     this._canPost(acct, evt.valueDate, direction === 'CREDIT' ? total : -total);
-    const ids = [];
     const label = direction === 'CREDIT' ? 'Credit' : 'Debit';
     const xfer = evt.transferId ? ` [transfer ${evt.transferId}]` : '';
     const entries = parts.map((amt, i) => {
       const entryId = parts.length > 1 ? `${evt.id}#${i + 1}` : evt.id;
-      ids.push(entryId);
       const story = parts.length > 1
         ? `${label} ${evt.id} instalment ${i + 1}/${parts.length} of ${this._fmt(acct, total)}${xfer}`
         : `${label} ${evt.id}${xfer}`;
@@ -235,13 +268,13 @@ class LedgerShard {
         postingDate: evt.day, valueDate: evt.valueDate, counterparty: evt.counterparty, transferId: evt.transferId,
         instalment: parts.length > 1 ? `${i + 1}/${parts.length}` : undefined, story });
     });
-    this._refer(acct, evt.id, { kind: evt.type, direction, amount: total, parts, entryIds: ids, valueDate: evt.valueDate,
-      postingDate: evt.day, counterparty: evt.counterparty, transferId: evt.transferId });
+    this._refer(acct, new Ref(evt.id, evt.type, direction, total, evt.valueDate, evt.day, parts.length > 1 ? parts : null,
+      evt.counterparty, evt.transferId, null));
     return {
       outcome: parts.length > 1 ? `POSTED_IN_${parts.length}_INSTALMENTS` : 'POSTED',
       narration: entries.length > 1
-        ? `${label} ${evt.id} ${this._fmt(acct, total)} split into ${parts.length} instalments `
-          + `(${parts.map((p) => money.format(p, acct.currency)).join(' + ')}); ${entries[0].narration.split('; ').slice(1).join('; ')}`
+        ? flat(`${label} ${evt.id} ${this._fmt(acct, total)} split into ${parts.length} instalments `
+          + `(${parts.map((p) => money.format(p, acct.currency)).join(' + ')}); ${entries[0].narration.split('; ').slice(1).join('; ')}`)
         : entries[0].narration,
     };
   }
@@ -261,20 +294,20 @@ class LedgerShard {
       postingDate: evt.day, valueDate: evt.valueDate, counterparty: chargeParty, story: `Service charge ${evt.id}` });
     let vatRef = null;
     let narration = e.narration;
-    if (vat > 0) {
+    if (vat > 0) {  // (joined below with +=, flattened at the end)
       vatRef = { entryId: `VAT:${evt.id}`, amount: vat, refunded: 0 };
       const v = this._post(acct, { entryId: vatRef.entryId, eventId: evt.id, kind: 'VAT', direction: 'DEBIT', amount: vat,
         postingDate: evt.day, valueDate: evt.valueDate, refersTo: evt.id, counterparty: this.policy.bank.gl.VAT_PAYABLE,
         story: `VAT ${this._vatBps(acct) / 100}% on charge ${evt.id} (${this._fmt(acct, amt)}), separate entry` });
       narration += ` | ${v.narration}`;
     }
-    this._refer(acct, evt.id, { kind: 'CHARGE', direction: 'DEBIT', amount: amt, parts: [amt], entryIds: [evt.id],
-      valueDate: evt.valueDate, postingDate: evt.day, vat: vatRef, counterparty: chargeParty });
-    return { outcome: vat > 0 ? 'POSTED_WITH_VAT' : 'POSTED', narration };
+    this._refer(acct, new Ref(evt.id, 'CHARGE', 'DEBIT', amt, evt.valueDate, evt.day, null, chargeParty, null, vatRef));
+    return { outcome: vat > 0 ? 'POSTED_WITH_VAT' : 'POSTED', narration: vat > 0 ? flat(narration) : narration };
   }
 
   _authorize(evt, acct, seq) {
     const amt = this._amount(evt, acct);
+    if (acct.auths === null) acct.auths = new Map();
     if (acct.auths.has(evt.authId)) {
       throw new LedgerError(CODES.DUPLICATE_AUTH_ID, `authorization ${evt.authId} already exists on ${acct.id}`);
     }
@@ -289,17 +322,17 @@ class LedgerShard {
     auth.history.push(Object.freeze({ day: this.openDay, state: auth.state, eventId: evt.id }));
     if (approved) acct.holds = money.safe(acct.holds + amt);
     acct.auths.set(evt.authId, auth);
-    const narration = `Authorization ${evt.authId} (${evt.id}) for ${this._fmt(acct, amt)} on ${partyText(acct.party)}`
+    const narration = flat(`Authorization ${evt.authId} (${evt.id}) for ${this._fmt(acct, amt)} on ${partyText(acct.party)}`
       + ` payable to ${partyText(evt.counterparty)}: ledger ${this._fmt(acct, acct.book)} − active holds `
       + `${this._fmt(acct, approved ? acct.holds - amt : acct.holds)} − this hold ${this._fmt(acct, amt)} = available `
       + `${this._fmt(acct, availableAfter)} → ${approved ? 'APPROVED, hold placed (ledger balance unchanged)' : 'DECLINED, no hold placed'}`
-      + `; requested D${evt.day}`;
+      + `; requested D${evt.day}`);
     return { outcome: approved ? 'AUTH_APPROVED' : 'AUTH_DECLINED', narration };
   }
 
   _settle(evt, acct) {
     const amt = this._amount(evt, acct);
-    const auth = acct.auths.get(evt.authId);
+    const auth = acct.auths && acct.auths.get(evt.authId);
     if (!auth) {
       throw new LedgerError(CODES.SETTLEMENT_UNKNOWN_AUTH,
         `settlement ${evt.id} references ${evt.authId}, which has no authorization on ${acct.id}; no funds moved`);
@@ -323,8 +356,7 @@ class LedgerShard {
       postingDate: evt.day, valueDate: evt.valueDate, authId: evt.authId, counterparty: party,
       story: `Settlement ${evt.id} of ${evt.authId} (hold ${this._fmt(acct, auth.amount)} approved D${auth.requestedDay} via `
         + `${auth.eventId}; ${released > 0 ? `${this._fmt(acct, released)} of the hold released` : 'hold fully used'})` });
-    this._refer(acct, evt.id, { kind: 'SETTLEMENT', direction: 'DEBIT', amount: amt, parts: [amt], entryIds: [evt.id],
-      valueDate: evt.valueDate, postingDate: evt.day, counterparty: party });
+    this._refer(acct, new Ref(evt.id, 'SETTLEMENT', 'DEBIT', amt, evt.valueDate, evt.day, null, party, null, null));
     auth.state = 'SETTLED';
     auth.settledAmount = amt;
     auth.releasedAmount = released;
@@ -334,8 +366,8 @@ class LedgerShard {
   }
 
   _target(evt, acct, allowed) {
-    const t = acct.refs.get(evt.ref);
-    if (!t) throw new LedgerError(CODES.REFERENCE_NOT_FOUND, `${evt.ref} not found on ${acct.id}`);
+    const t = acct.ids && acct.ids.get(evt.ref);
+    if (!(t instanceof Ref)) throw new LedgerError(CODES.REFERENCE_NOT_FOUND, `${evt.ref} not found on ${acct.id}`);
     if (!allowed.has(t.kind)) {
       throw new LedgerError(CODES.REFERENCE_NOT_ELIGIBLE, `${evt.type} cannot target a ${t.kind} (${evt.ref})`);
     }
@@ -365,13 +397,13 @@ class LedgerShard {
     const vatAmt = t.vat ? t.vat.amount - t.vat.refunded : 0;
     this._canPost(acct, evt.valueDate, (dir === 'CREDIT' ? 1 : -1) * t.amount + vatAmt);
     const narr = [];
-    t.parts.forEach((amt, i) => {
-      const e = this._post(acct, { entryId: t.parts.length > 1 ? `${evt.id}#${i + 1}` : evt.id, eventId: evt.id,
-        kind: 'REVERSAL', direction: dir, amount: amt, postingDate: evt.day, valueDate: evt.valueDate,
-        refersTo: t.entryIds[i], counterparty: t.counterparty, transferId: t.transferId,
-        story: `Reversal ${evt.id} of ${t.entryIds[i]} (original ${this._origText(acct, t)}; original entry kept, this is a separate ${dir} entry)` });
+    for (let i = 0; i < t.partCount; i++) {
+      const e = this._post(acct, { entryId: t.parts ? `${evt.id}#${i + 1}` : evt.id, eventId: evt.id,
+        kind: 'REVERSAL', direction: dir, amount: t.part(i), postingDate: evt.day, valueDate: evt.valueDate,
+        refersTo: t.entryId(i), counterparty: t.counterparty, transferId: t.transferId,
+        story: `Reversal ${evt.id} of ${t.entryId(i)} (original ${this._origText(acct, t)}; original entry kept, this is a separate ${dir} entry)` });
       narr.push(e.narration);
-    });
+    }
     if (vatAmt > 0) {
       const e = this._post(acct, { entryId: `VAT:${evt.id}`, eventId: evt.id, kind: 'VAT_REVERSAL', direction: 'CREDIT',
         amount: vatAmt, postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.vat.entryId,
@@ -404,9 +436,9 @@ class LedgerShard {
     const left = remaining - amt;
     const narr = [];
     const e = this._post(acct, { entryId: evt.id, eventId: evt.id, kind: evt.type, direction: 'CREDIT', amount: amt,
-      postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.entryIds[0], counterparty: t.counterparty,
+      postingDate: evt.day, valueDate: evt.valueDate, refersTo: t.entryId(0), counterparty: t.counterparty,
       transferId: t.transferId,
-      story: `${label} ${evt.id} against ${t.kind} ${t.entryIds[0]} (original ${this._origText(acct, t)}); `
+      story: `${label} ${evt.id} against ${t.kind} ${t.entryId(0)} (original ${this._origText(acct, t)}); `
         + `${left === 0 ? 'fully' : 'partially'} refunded, ${this._fmt(acct, left)} remaining` });
     narr.push(e.narration);
     if (vatBack > 0) {
@@ -420,9 +452,9 @@ class LedgerShard {
     return { outcome: t.consumed === t.amount ? `${evt.type}_FULL` : `${evt.type}_PARTIAL`, narration: narr.join(' | ') };
   }
 
-  _refer(acct, id, rec) {
-    acct.refs.set(id, { ...rec, consumed: 0, reversedBy: null, vat: rec.vat || null,
-      counterparty: rec.counterparty ?? null, transferId: rec.transferId ?? null });
+  _refer(acct, ref) {
+    if (acct.ids === null) acct.ids = new Map();
+    acct.ids.set(ref.id, ref);
   }
 
   /** The only place a ledger entry is created. */
@@ -432,9 +464,9 @@ class LedgerShard {
     const from = e.direction === 'CREDIT' ? (e.counterparty ?? null) : acct.party;
     const to = e.direction === 'CREDIT' ? acct.party : (e.counterparty ?? null);
     const back = e.postingDate - e.valueDate;
-    const narration = `${e.story}; ${e.direction} ${this._fmt(acct, e.amount)} from ${partyText(from)} to ${partyText(to)}`
+    const narration = flat(`${e.story}; ${e.direction} ${this._fmt(acct, e.amount)} from ${partyText(from)} to ${partyText(to)}`
       + `; posted D${e.postingDate}, value D${e.valueDate}${back > 0 ? ` (back-valued ${back} day${back > 1 ? 's' : ''})` : ''}`
-      + `${this.openDay > e.postingDate ? `; arrived late, processed D${this.openDay}` : ''}`;
+      + `${this.openDay > e.postingDate ? `; arrived late, processed D${this.openDay}` : ''}`);
     const entry = Object.freeze({
       entryId: e.entryId,
       eventId: e.eventId ?? null,
@@ -462,7 +494,7 @@ class LedgerShard {
     }
     if (this.retainJournal) this.journal.push(entry);
     this.journalCount++;
-    if (this.detail) acct.today.push(entry);
+    if (this.detail) (acct.today || (acct.today = [])).push(entry);
     return entry;
   }
 
@@ -472,8 +504,8 @@ class LedgerShard {
   }
 
   _reject(seq, eventId, type, account, day, code, message) {
-    const narration = `${type ?? 'Event'} ${eventId ?? '(no id)'}${account ? ` on ${account}` : ''} REJECTED `
-      + `(${code}): ${message}; ledger unchanged; processed D${this.openDay}`;
+    const narration = flat(`${type ?? 'Event'} ${eventId ?? '(no id)'}${account ? ` on ${account}` : ''} REJECTED `
+      + `(${code}): ${message}; ledger unchanged; processed D${this.openDay}`);
     this._log(seq, eventId, type, account, Number.isSafeInteger(day) ? day : null, 'REJECTED', code, null, narration);
     this.stats.rejected++;
     this.errorTotal++;
@@ -517,6 +549,7 @@ class LedgerShard {
         const before = v <= acct.closedThrough ? acct.g(F_CLOSING, v) : null;
         running = money.safe(running + acct.g(F_DELTA, v));
         acct.p(F_PREFEE, v, running);
+        let feeNow = false;
         if (running < 0 && acct.g(F_FEE, v) === 0) {
           const fee = this.feeMinor[acct.currency];
           if (fee === undefined) {
@@ -539,16 +572,16 @@ class LedgerShard {
                 postingDate: D, valueDate: v, refersTo: feeId, counterparty: gl.VAT_PAYABLE,
                 story: `VAT ${this._vatBps(acct) / 100}% on overdraft fee ${feeId}, separate entry` });
             }
-            this._refer(acct, feeId, { kind: 'FEE', direction: 'DEBIT', amount: fee, parts: [fee], entryIds: [feeId],
-              valueDate: v, postingDate: D, vat: vatRef, counterparty: gl.FEE_INCOME });
+            this._refer(acct, new Ref(feeId, 'FEE', 'DEBIT', fee, v, D, null, gl.FEE_INCOME, null, vatRef));
             acct.p(F_FEE, v, 1);
+            feeNow = true;
             running = money.safe(running - fee - vat);
             fees.push({ entryId: feeId, valueDate: v, postingDate: D, amount: fee, vat, preFeeBalance: acct.g(F_PREFEE, v) });
           }
         }
         acct.p(F_CLOSING, v, running);
         if (before !== null && before !== running) {
-          restated.push({ valueDate: v, before, preFee: acct.g(F_PREFEE, v), after: running });
+          restated.push({ valueDate: v, before, preFee: acct.g(F_PREFEE, v), after: running, feeAssessedNow: feeNow });
         }
 
         // interest with carried remainder
@@ -569,6 +602,7 @@ class LedgerShard {
               + `day's rounded share ${target}${isAdj ? `, previously ${posted}, adjusting ${diff > 0 ? '+' : ''}${diff}` : ''}`
               + `; posted D${D}`,
           });
+          // (accrual narrations are few: at most one per account per day, so they are not flattened)
           this.accruals.push(rec);
           acct.accrualSum = money.safe(acct.accrualSum + diff);
           acct.accrualRecords++;
@@ -620,7 +654,7 @@ class LedgerShard {
 
       if (this.detail) {
         const auths = [];
-        for (const a of acct.auths.values()) {
+        for (const a of (acct.auths ? acct.auths.values() : [])) {
           auths.push({ authId: a.authId, eventId: a.eventId, state: a.state, amount: a.amount,
             requestedDay: a.requestedDay, availableAfter: a.availableAfter, settledAmount: a.settledAmount,
             releasedAmount: a.releasedAmount, settledBy: a.settledBy,
@@ -631,11 +665,11 @@ class LedgerShard {
           preCapitalization: capitalized ? closing - capitalized : null,
           holds: acct.holds, available: money.safe(acct.book - acct.holds),
           fees, accruals: accr, accruedToDate: acct.accrualSum, restated, capitalized, auths,
-          entries: acct.today.slice(),
+          entries: acct.today ? acct.today.slice() : [],
           valueDayBalances: Array.from({ length: D }, (_, i) => acct.g(F_CLOSING, i + 1)),
         });
       }
-      acct.today.length = 0;
+      acct.today = null;
     }
 
     const report = {
@@ -673,7 +707,11 @@ class LedgerShard {
 
   available(accountId) { const a = this._acct(accountId); return a.book - a.holds; }
   bookBalance(accountId) { return this._acct(accountId).book; }
-  auth(accountId, authId) { const a = this._acct(accountId).auths.get(authId); return a ? { ...a, history: [...a.history] } : null; }
+  auth(accountId, authId) {
+    const auths = this._acct(accountId).auths;
+    const a = auths && auths.get(authId);
+    return a ? { ...a, history: [...a.history] } : null;
+  }
   accrualSum(accountId) { return this._acct(accountId).accrualSum; }
 
   _acct(id) {

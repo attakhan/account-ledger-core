@@ -28,6 +28,7 @@ function mergeReports(parts) {
     out.stats.rejected += p.stats.rejected;
   }
   if (out.accounts) out.accounts.sort((a, b) => (a.account < b.account ? -1 : a.account > b.account ? 1 : 0));
+  out.errorCounts = Object.fromEntries(Object.entries(out.errorCounts).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   out.errors.sort(bySeq);
   out.notices.sort(bySeq);
   return out;
