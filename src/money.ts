@@ -1,4 +1,3 @@
-'use strict';
 /**
  * Money is held as an integer count of the currency's minor unit (fils) in a
  * JS Number. Every arithmetic result passes through `safe()`; a value outside
@@ -6,28 +5,30 @@
  * No floating-point value ever represents money: parsing goes string → integer
  * and formatting goes integer → string.
  */
-const { CODES, LedgerError } = require('./errors');
+import { CODES, LedgerError } from './errors';
 
-const CURRENCIES = Object.freeze({
+export interface CurrencyInfo { readonly code: string; readonly precision: number }
+
+export const CURRENCIES: Readonly<Record<string, CurrencyInfo>> = Object.freeze({
   AED: Object.freeze({ code: 'AED', precision: 2 }),
   BHD: Object.freeze({ code: 'BHD', precision: 3 }),
 });
 
-function currencyInfo(code) {
+export function currencyInfo(code: string): CurrencyInfo {
   const c = CURRENCIES[code];
   if (!c) throw new LedgerError(CODES.INVALID_EVENT, `unsupported currency ${code}`);
   return c;
 }
 
-function safe(n) {
+export function safe(n: number): number {
   if (!Number.isSafeInteger(n)) {
     throw new LedgerError(CODES.AMOUNT_OVERFLOW, `amount ${n} exceeds safe integer range`);
   }
   return n;
 }
 
-const add = (a, b) => safe(a + b);
-const sub = (a, b) => safe(a - b);
+export const add = (a: number, b: number): number => safe(a + b);
+export const sub = (a: number, b: number): number => safe(a - b);
 
 const AMOUNT_RE = /^(-)?(\d{1,15})(?:\.(\d+))?$/;
 
@@ -37,7 +38,7 @@ const AMOUNT_RE = /^(-)?(\d{1,15})(?:\.(\d+))?$/;
  * rounded: silently rounding an inbound instruction would move money that was
  * never instructed. Numbers (not strings) are refused to keep float out.
  */
-function parseAmount(raw, currency, { allowNegative = false } = {}) {
+export function parseAmount(raw: unknown, currency: string, { allowNegative = false }: { allowNegative?: boolean } = {}): number {
   const { precision } = currencyInfo(currency);
   if (typeof raw !== 'string') {
     throw new LedgerError(CODES.INVALID_AMOUNT, `amount must be a decimal string, got ${typeof raw}`);
@@ -55,7 +56,8 @@ function parseAmount(raw, currency, { allowNegative = false } = {}) {
   return neg ? -minor : minor;
 }
 
-function format(minor, currency) {
+/** Display format with thousands separators: 120000 AED → "1,200.00". */
+export function format(minor: number, currency: string): string {
   const { precision } = currencyInfo(currency);
   const sign = minor < 0 ? '-' : '';
   const abs = Math.abs(minor);
@@ -64,11 +66,19 @@ function format(minor, currency) {
   return `${sign}${whole}.${s.slice(s.length - precision)}`;
 }
 
+/** Machine format, no grouping, parseable by parseAmount: 120000 AED → "1200.00". */
+export function toDecimal(minor: number, currency: string): string {
+  const { precision } = currencyInfo(currency);
+  const sign = minor < 0 ? '-' : '';
+  const s = String(Math.abs(minor)).padStart(precision + 1, '0');
+  return `${sign}${s.slice(0, s.length - precision)}.${s.slice(s.length - precision)}`;
+}
+
 /**
  * Round the exact rational num/den (integers, den > 0) to an integer using
  * round-half-to-even. Pure integer arithmetic; no float division is trusted.
  */
-function divRoundHalfEven(num, den) {
+export function divRoundHalfEven(num: number, den: number): number {
   safe(num); safe(den);
   if (den <= 0) throw new RangeError('den must be positive');
   let q = Math.trunc(num / den);
@@ -91,7 +101,7 @@ function divRoundHalfEven(num, den) {
  * exactly to `total`. The indivisible remainder goes one unit each to the
  * earliest pieces (largest-remainder method), e.g. 10000 / 3 → [3334, 3333, 3333].
  */
-function allocateEqual(total, parts) {
+export function allocateEqual(total: number, parts: number): number[] {
   if (!Number.isSafeInteger(parts) || parts < 1) {
     throw new LedgerError(CODES.INVALID_EVENT, `instalments must be a positive integer, got ${parts}`);
   }
@@ -101,9 +111,7 @@ function allocateEqual(total, parts) {
   }
   const base = Math.floor(total / parts);
   const rem = total - base * parts;
-  const out = new Array(parts);
+  const out = new Array<number>(parts);
   for (let i = 0; i < parts; i++) out[i] = base + (i < rem ? 1 : 0);
   return out;
 }
-
-module.exports = { CURRENCIES, currencyInfo, safe, add, sub, parseAmount, format, divRoundHalfEven, allocateEqual };

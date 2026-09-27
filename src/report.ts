@@ -1,20 +1,20 @@
-'use strict';
 /** Human-readable rendering of day-close reports. Pure functions: report in, string out. */
-const { format } = require('./money');
+import { format } from './money';
+import type { AccountDayReport, DayReport, JournalEntry, Party } from './types';
 
-const fm = (minor, ccy) => format(minor, ccy);
-const signed = (minor, ccy) => (minor > 0 ? '+' : '') + fm(minor, ccy);
+const fm = (minor: number, ccy: string): string => format(minor, ccy);
+const signed = (minor: number, ccy: string): string => (minor > 0 ? '+' : '') + fm(minor, ccy);
 
-function partyShort(p) {
+function partyShort(p: Party | null): string {
   if (!p) return '—';
   return `${p.accountNumber}${p.accountName ? ` / ${p.accountName}` : ''}${p.bankName ? ` / ${p.bankName}` : ''}`;
 }
 
-function renderAccount(a, day, out) {
+function renderAccount(a: AccountDayReport, day: number, out: string[]): void {
   const c = a.currency;
   out.push(`  ${a.account} (${c}) ${a.party ? `— ${a.party.accountName ?? ''}, ${a.party.bankName ?? ''}` : ''}`);
   out.push(`    Closing ledger balance D${day}: ${fm(a.closing, c)}`
-    + (a.capitalized ? `   (before capitalization ${fm(a.preCapitalization, c)})` : '')
+    + (a.capitalized ? `   (before capitalization ${fm(a.preCapitalization!, c)})` : '')
     + `   | active holds ${fm(a.holds, c)} | available ${fm(a.available, c)}`);
 
   if (a.restated.length) {
@@ -70,8 +70,8 @@ function renderAccount(a, day, out) {
   }
 }
 
-function renderDay(r, { errorLimit = 25 } = {}) {
-  const out = [];
+export function renderDay(r: DayReport, { errorLimit = 25 }: { errorLimit?: number } = {}): string {
+  const out: string[] = [];
   out.push('');
   out.push(`════════════════════════ DAY ${r.day} CLOSE ════════════════════════`);
   out.push(`Events processed during D${r.day}: ${r.stats.accepted} accepted, ${r.stats.rejected} rejected`);
@@ -107,7 +107,7 @@ function renderDay(r, { errorLimit = 25 } = {}) {
 }
 
 /** Final restated view: closing balance per value day as known at end of window. */
-function renderFinal(last) {
+export function renderFinal(last: DayReport): string {
   if (!last.accounts) return '';
   const out = ['', '════════════════ END OF WINDOW — RESTATED VALUE-DAY BALANCES ════════════════'];
   const days = last.accounts[0] ? last.accounts[0].valueDayBalances.length : 0;
@@ -120,13 +120,13 @@ function renderFinal(last) {
 }
 
 /** Account statement across the window: every entry, both directions, never netted. */
-function renderStatement(reports) {
-  const byAcct = new Map();
+export function renderStatement(reports: DayReport[]): string {
+  const byAcct = new Map<string, { currency: string; opening: number; entries: JournalEntry[] }>();
   for (const r of reports) {
     if (!r.accounts) return '';
     for (const a of r.accounts) {
       if (!byAcct.has(a.account)) byAcct.set(a.account, { currency: a.currency, opening: a.opening, entries: [] });
-      byAcct.get(a.account).entries.push(...a.entries);
+      byAcct.get(a.account)!.entries.push(...a.entries);
     }
   }
   const out = ['', '════════════════ ACCOUNT STATEMENTS (every entry, debit and credit kept separate) ════════════════'];
@@ -145,4 +145,3 @@ function renderStatement(reports) {
   return out.join('\n');
 }
 
-module.exports = { renderDay, renderFinal, renderStatement };

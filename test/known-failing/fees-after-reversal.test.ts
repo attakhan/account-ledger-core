@@ -1,4 +1,3 @@
-'use strict';
 /**
  * KNOWN-FAILING TEST. It is written against my own design and it fails on purpose.
  * Run with `npm run test:known-failing`. `npm test` excludes it so CI stays meaningful.
@@ -30,9 +29,9 @@
  *     75.00 less in fees. The customer's charges depend on when a correction
  *     arrives, not only on what it corrects.
  */
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { runScenario, scenarioLines } = require('../helpers');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { runScenario, scenarioLines, type Scenario } from '../helpers';
 
 test('KNOWN-FAILING: fees caused solely by a fully reversed posting are refunded by end of window', async () => {
   const S = await runScenario();
@@ -65,6 +64,6 @@ test('(control, passes) the same corrections in a different arrival order yield 
   assert.equal(fees, 0, 'no fees when the reversal lands before the close. Order-dependence made visible');
 });
 
-function countFeesUpTo(S, v) {
+function countFeesUpTo(S: Scenario, v: number): number {
   return S.shard.journal.filter((e) => e.kind === 'FEE' && e.valueDate <= v).length;
 }

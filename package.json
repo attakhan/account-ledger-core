@@ -1,19 +1,45 @@
 {
   "name": "account-ledger-core",
   "version": "1.0.0",
-  "description": "In-memory, append-only, sharded account ledger core with a six-day event replay",
+  "description": "In-memory, append-only, sharded account ledger core with a six-day event replay and an HTTP account-ledger API",
   "private": true,
   "type": "commonjs",
-  "engines": { "node": ">=20" },
-  "bin": { "ledger-replay": "bin/replay.js" },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/src/replay.js",
+  "bin": {
+    "ledger-replay": "dist/bin/replay.js",
+    "ledger-serve": "dist/bin/serve.js"
+  },
   "scripts": {
-    "replay": "node bin/replay.js data/scenario.ndjson",
-    "replay:sharded": "node bin/replay.js data/scenario.ndjson --shards 2",
-    "test": "node --test test/unit/*.test.js test/scenario/*.test.js",
-    "test:known-failing": "node --test test/known-failing/*.test.js",
-    "test:all": "node --test test/unit/*.test.js test/scenario/*.test.js test/known-failing/*.test.js",
-    "gen:load": "node scripts/gen-load.js",
-    "bench": "node scripts/bench.js"
+    "build": "npm run clean && tsc -p .",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "typecheck": "tsc -p . --noEmit",
+    "prereplay": "npm run build",
+    "replay": "node dist/bin/replay.js data/scenario.ndjson",
+    "prereplay:sharded": "npm run build",
+    "replay:sharded": "node dist/bin/replay.js data/scenario.ndjson --shards 2",
+    "preserve": "npm run build",
+    "serve": "node dist/bin/serve.js",
+    "pretest": "npm run build",
+    "test": "node --test dist/test/unit/*.test.js dist/test/scenario/*.test.js dist/test/api/*.test.js",
+    "pretest:known-failing": "npm run build",
+    "test:known-failing": "node --test dist/test/known-failing/*.test.js",
+    "pretest:all": "npm run build",
+    "test:all": "node --test dist/test/unit/*.test.js dist/test/scenario/*.test.js dist/test/api/*.test.js dist/test/known-failing/*.test.js",
+    "pregen:load": "npm run build",
+    "gen:load": "node dist/scripts/gen-load.js",
+    "prebench": "npm run build",
+    "bench": "node dist/scripts/bench.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2"
   },
   "license": "UNLICENSED"
 }

@@ -1,23 +1,25 @@
-'use strict';
 /** Merge per-shard day reports into one deterministic report (order-independent of shard count). */
-const bySeq = (a, b) => (a.seq ?? Infinity) - (b.seq ?? Infinity) || String(a.account).localeCompare(String(b.account));
+import type { CurrencyTotals, DayReport } from './types';
 
-function mergeReports(parts) {
-  const out = {
+const bySeq = (a: { seq: number | null; account: string | null }, b: { seq: number | null; account: string | null }) =>
+  (a.seq ?? Infinity) - (b.seq ?? Infinity) || String(a.account).localeCompare(String(b.account));
+
+export function mergeReports(parts: DayReport[]): DayReport {
+  const out: DayReport = {
     day: parts[0].day,
     accounts: parts.some((p) => p.accounts) ? [] : null,
-    totals: Object.create(null),
+    totals: Object.create(null) as Record<string, CurrencyTotals>,
     errors: [],
-    errorCounts: Object.create(null),
+    errorCounts: Object.create(null) as Record<string, number>,
     errorTotal: 0,
     notices: [],
     stats: { accepted: 0, rejected: 0 },
   };
   for (const p of parts) {
     if (p.day !== out.day) throw new Error(`shard reports disagree on day: ${p.day} vs ${out.day}`);
-    if (p.accounts) out.accounts.push(...p.accounts);
+    if (p.accounts) out.accounts!.push(...p.accounts);
     for (const [ccy, t] of Object.entries(p.totals)) {
-      const o = out.totals[ccy] || (out.totals[ccy] = {});
+      const o = (out.totals[ccy] || (out.totals[ccy] = {} as CurrencyTotals)) as unknown as Record<string, number>;
       for (const [k, v] of Object.entries(t)) o[k] = (o[k] || 0) + v;
     }
     out.errors.push(...p.errors);
@@ -33,5 +35,3 @@ function mergeReports(parts) {
   out.notices.sort(bySeq);
   return out;
 }
-
-module.exports = { mergeReports };

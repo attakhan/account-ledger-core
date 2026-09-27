@@ -1,31 +1,43 @@
 #!/usr/bin/env node
-'use strict';
 /**
  * Replay an NDJSON event stream through the ledger and print, per day:
  * closing ledger balance, fee assessments, authorization states, errors.
  *
- *   node bin/replay.js [events.ndjson] [--accounts data/accounts.json]
+ *   node dist/bin/replay.js [events.ndjson] [--accounts data/accounts.json]
  *        [--shards N] [--json] [--summary | --detail] [--vat-bps N] [--quiet]
  *        [--no-journal-retention]   benchmark only: entries are built, reported, then dropped
  *
  * Exit codes: 0 replay completed (business rejections are normal output),
  *             1 fatal (bug / worker crash / unreadable input), 2 bad usage.
  */
-const fs = require('node:fs');
-const path = require('node:path');
-const { replay, inProcess } = require('../src/replay');
-const { ShardedEngine } = require('../src/sharded');
-const { DEFAULT_POLICY, DEFAULT_RUNTIME } = require('../src/config');
-const { renderDay, renderFinal, renderStatement } = require('../src/report');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { replay, inProcess } from '../src/replay';
+import { ShardedEngine } from '../src/sharded';
+import { DEFAULT_POLICY, DEFAULT_RUNTIME } from '../src/config';
+import { DATA_DIR } from '../src/paths';
+import { renderDay, renderFinal, renderStatement } from '../src/report';
+import type { AccountConfig, DayReport, Engine, Policy } from '../src/types';
 
-function usage(msg) {
+interface Args {
+  events: string;
+  accounts: string;
+  shards: number;
+  json: boolean;
+  detail: boolean | null;
+  vatBps: number | null;
+  quiet: boolean;
+  retainJournal: boolean;
+}
+
+function usage(msg?: string): never {
   if (msg) process.stderr.write(`error: ${msg}\n`);
   process.stderr.write('usage: replay.js [events.ndjson] [--accounts file] [--shards N] [--json] [--summary|--detail] [--vat-bps N] [--quiet] [--no-journal-retention]\n');
   process.exit(2);
 }
 
-function parseArgs(argv) {
-  const o = { events: null, accounts: null, shards: 0, json: false, detail: null, vatBps: null, quiet: false, retainJournal: true };
+function parseArgs(argv: string[]): Args {
+  const o: Omit<Args, 'events' | 'accounts'> & { events: string | null; accounts: string | null } = { events: null, accounts: null, shards: 0, json: false, detail: null, vatBps: null, quiet: false, retainJournal: true };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => { if (i + 1 >= argv.length) usage(`${a} needs a value`); return argv[++i]; };
@@ -42,32 +54,33 @@ function parseArgs(argv) {
     else if (o.events === null) o.events = a;
     else usage(`unexpected argument ${a}`);
   }
-  const root = path.join(__dirname, '..');
-  o.events = o.events ?? path.join(root, 'data', 'scenario.ndjson');
-  o.accounts = o.accounts ?? path.join(root, 'data', 'accounts.json');
-  return o;
+  return {
+    ...o,
+    events: o.events ?? path.join(DATA_DIR, 'scenario.ndjson'),
+    accounts: o.accounts ?? path.join(DATA_DIR, 'accounts.json'),
+  };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const o = parseArgs(process.argv.slice(2));
-  let accounts;
+  let accounts: AccountConfig[] = [];
   try {
     accounts = JSON.parse(fs.readFileSync(o.accounts, 'utf8'));
     if (!Array.isArray(accounts)) throw new Error('accounts file must be a JSON array');
-  } catch (e) { process.stderr.write(`fatal: cannot load accounts ${o.accounts}: ${e.message}\n`); process.exit(1); }
+  } catch (e) { process.stderr.write(`fatal: cannot load accounts ${o.accounts}: ${(e as Error).message}\n`); process.exit(1); }
   if (!fs.existsSync(o.events)) { process.stderr.write(`fatal: events file not found: ${o.events}\n`); process.exit(1); }
 
-  const policy = o.vatBps === null ? DEFAULT_POLICY
+  const policy: Policy = o.vatBps === null ? DEFAULT_POLICY
     : Object.freeze({ ...DEFAULT_POLICY, vatBps: Object.freeze({ AED: o.vatBps, BHD: o.vatBps }) });
   const detail = o.detail ?? accounts.length <= DEFAULT_RUNTIME.detailAccountLimit;
-  const engine = o.shards > 0
+  const engine: Engine = o.shards > 0
     ? new ShardedEngine({ accounts, shards: o.shards, policy, detail, errorSampleLimit: DEFAULT_RUNTIME.errorSampleLimit,
       retainJournal: o.retainJournal })
     : inProcess(accounts, { policy, detail, errorSampleLimit: DEFAULT_RUNTIME.errorSampleLimit, retainJournal: o.retainJournal });
 
   const t0 = process.hrtime.bigint();
-  const print = (s) => { if (!o.quiet) process.stdout.write(s + '\n'); };
-  let result;
+  const print = (s: string): void => { if (!o.quiet) process.stdout.write(s + '\n'); };
+  let result: { reports: DayReport[]; events: number };
   try {
     if (!o.json) {
       print(`Replaying ${path.relative(process.cwd(), o.events) || o.events} — ${accounts.length} accounts, `
@@ -79,7 +92,7 @@ async function main() {
       onDayClosed: (r) => { if (!o.json) print(renderDay(r, { errorLimit: DEFAULT_RUNTIME.errorSampleLimit })); },
     });
   } catch (e) {
-    process.stderr.write(`fatal: replay aborted: ${e && e.stack ? e.stack : e}\n`);
+    process.stderr.write(`fatal: replay aborted: ${e instanceof Error && e.stack ? e.stack : e}\n`);
     await engine.close().catch(() => {});
     process.exit(1);
   }

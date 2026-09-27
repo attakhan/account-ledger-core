@@ -1,16 +1,20 @@
 # Account Ledger Core
 
-This is an in-memory ledger core written in Node.js. It keeps an append-only record of every event and
+This is an in-memory ledger core written in TypeScript for Node.js. It keeps an append-only record of every event and
 every ledger entry. It handles value-dated fees, interest that accrues daily and is capitalized once,
 card authorizations and settlements, and reversals, returns and refunds. Each of these produces its own
 separate journal entry, with from/to party details and a narration line. Accounts can be split across
 worker threads to process large event streams.
 
-There is no web layer, no persistence, no UI and no database, and there are no npm dependencies. It needs
-Node ≥ 20 (developed on 22).
+The core has no persistence, no UI and no database. A small Express API (`npm run serve`) serves each
+account's ledger as JSON and accepts new events, which it persists by appending to an NDJSON file. The only
+runtime dependency is Express. TypeScript is compiled with `tsc` into `dist/`. Every npm script builds first.
+It needs Node ≥ 20 (developed on 22).
 
 ```bash
-npm test                   # 48 tests — must pass
+npm install
+npm test                   # 56 tests — must pass
+npm run serve              # HTTP API on :3000 (see "HTTP API server" at the end)
 npm run replay             # the brief's 10-event, 6-day scenario, printed per day
 npm run replay:sharded     # same stream across 2 worker threads — identical output
 npm run test:known-failing # the one deliberately failing test (see below)
@@ -21,25 +25,29 @@ npm run bench              # generates 1M events / 100k accounts and measures th
 
 | Path | What |
 |---|---|
-| `src/shard.js` | The engine: validation → posting → day close (fees, interest, restatement). One instance per shard. |
-| `src/money.js` | Integer minor-unit money: parse, format, half-even division, exact allocation. |
-| `src/events.js` | Structural validation of inbound events. |
-| `src/replay.js` | Streaming NDJSON replayer that drives the day clock. |
-| `src/sharded.js`, `src/worker.js` | Worker-thread sharding by account, with backpressure and a day-close barrier. |
-| `src/report.js`, `src/merge.js` | Deterministic merging of shard reports and rendering to text. |
-| `bin/replay.js` | The CLI. |
+| `src/types.ts` | Shared types: events, journal entries, reports, policy. |
+| `src/shard.ts` | The engine: validation → posting → day close (fees, interest, restatement). One instance per shard. |
+| `src/money.ts` | Integer minor-unit money: parse, format, half-even division, exact allocation. |
+| `src/events.ts` | Structural validation of inbound events. |
+| `src/replay.ts` | Streaming NDJSON replayer that drives the day clock. |
+| `src/sharded.ts`, `src/worker.ts` | Worker-thread sharding by account, with backpressure and a day-close barrier. |
+| `src/report.ts`, `src/merge.ts` | Deterministic merging of shard reports and rendering to text. |
+| `src/account-ledger.ts` | Per-account ledger view (JSON) built from the journal. |
+| `src/ledger-store.ts` | Persistent store: replays the events file, validates and appends new events. |
+| `src/server.ts`, `bin/serve.ts` | The Express HTTP API and its CLI. |
+| `bin/replay.ts` | The replay CLI. |
 | `data/scenario.ndjson`, `data/accounts.json` | The brief's event stream and accounts (dummy party data). |
 | `data/transfer-example.*` | A two-leg transfer, a charge with VAT, and charge and fee refunds. |
-| `scripts/gen-load.js`, `scripts/bench.js` | Synthetic load and the benchmark. |
-| `scripts/bench-numeric.js` | The measurement behind the Number-vs-BigInt decision. |
-| `test/unit`, `test/scenario` | The passing suite. |
+| `scripts/gen-load.ts`, `scripts/bench.ts` | Synthetic load and the benchmark. |
+| `scripts/bench-numeric.ts` | The measurement behind the Number-vs-BigInt decision. |
+| `test/unit`, `test/scenario`, `test/api` | The passing suite. |
 | `test/known-failing` | The one failing test. |
 | `NUMBERS.md`, `AMBIGUITIES.md`, `REJECTED.md`, `WORKLOG.md` | The required write-ups. |
 
 ## Running the replay
 
 ```bash
-node bin/replay.js [events.ndjson] [--accounts file.json] [--shards N]
+node dist/bin/replay.js [events.ndjson] [--accounts file.json] [--shards N]
                    [--summary | --detail] [--json] [--vat-bps N] [--quiet] [--no-journal-retention]
 ```
 
@@ -171,7 +179,7 @@ Final value-day balances for ACC-001, as restated after E9: 250.00 · 225.00 · 
 
 ## The failing test
 
-`test/known-failing/fees-after-reversal.test.js` asserts that, by the end of the window, a customer does
+`test/known-failing/fees-after-reversal.test.ts` asserts that, by the end of the window, a customer does
 not pay fees that exist only because of a posting the bank fully reversed at the same value date.
 
 It fails: AED 75.00 remains. The file's inline comments explain what that reveals:
@@ -202,3 +210,161 @@ The fields are as follows. Everything except `day`, `valueDate` and `instalments
     `FEE:<account>:D<n>`;
   - `instalments` — for CREDIT and DEBIT.
 - **Optional on any event:** `counterparty` (or `from`/`to`) and `transferId`.
+
+## HTTP API server (Express)
+
+This addition sits on top of the ledger core above. It doesn't change the engine or the replay output.
+It adds:
+- `src/server.ts`: the Express app.
+- `src/ledger-store.ts`: the persistent store behind it.
+- `src/account-ledger.ts`: builds the per-account JSON.
+- `bin/serve.ts`: the CLI that starts the server.
+
+### Endpoints
+
+| Method | Path | Result |
+|---|---|---|
+| `GET` | `/accounts/:accountNumber/ledger` | `200` the account's full ledger as JSON · `404` unknown account |
+| `POST` | `/accounts/:accountNumber/events` | `201` event accepted and saved · `422` rejected by the ledger (nothing saved) · `400` bad body or account mismatch · `404` unknown account |
+
+Other methods on these paths return `405`, and any other path returns `404`. Every error has the same JSON
+shape: `{ "error": { "code": "...", "message": "..." } }`.
+
+**The ledger response** (`GET`) has these fields:
+- `account`: number, name, bank, BIC, IBAN, currency and `minorUnits`.
+- `window`: `firstDay`, `lastDay`, `closedThroughDay`, `windowClosed`.
+- `balances`: `opening`, `closing`, `activeHolds`, `available`, `interestAccrued`, `interestCapitalized`.
+- `totals`: entry count, total debits, total credits, and `netMovement`.
+- `entries`: every journal entry in processing order. Each entry has:
+  - separate `debit` and `credit` columns (only one is set);
+  - a running `balanceAfter`;
+  - `postingDate`, `valueDate` and `processedOnDay`;
+  - `refersTo`, `from`/`to` party blocks, and a `narration`.
+- `valueDayBalances`: the closing balance of each day, as restated.
+- `interestAccruals`, `authorizations`.
+- `rejectedEvents`: this account's rejected events, with their error codes.
+
+All money is a decimal string in major units (`"620.00"`, `"3.334"`), never a float.
+
+**Adding an event** (`POST`):
+- **Body.** One event in the [event format](#event-format-ndjson-one-per-line). The `account` comes from
+  the path. If the body also has an `account`, it must match.
+- **`day`.** If omitted, the event goes on the **last day already in the events file**. To start a new day,
+  pass the next day (it must be inside the window).
+- **`id`.** If omitted, one is generated (`API-<uuid>`).
+- **Validation.** The event is first tried against a replay of the file with the event added.
+  - If the ledger **rejects** it, the response is `422` with the ledger's own error code (for example
+    `SETTLEMENT_UNKNOWN_AUTH` or `DUPLICATE_EVENT`). **Nothing is written.**
+  - If it is **accepted**, the line is appended to the events file and flushed to disk (fsync). The
+    response is `201` with:
+    - `outcome`, `postingDay` and `processedOnDay`;
+    - `narration`;
+    - the stored `event`;
+    - the ids of the journal `entries` it created;
+    - the account's updated `ledger`.
+
+### Persistence
+
+The events NDJSON file is the only durable state. On start, the server replays it, so a restart rebuilds
+exactly what was served before.
+- The default file is `data/events.ndjson`. On first start it is created as a copy of the seed file
+  (`data/scenario.ndjson` by default).
+- `data/scenario.ndjson` itself is never written to, because the test suite checks its exact results.
+- `data/events.ndjson` is local runtime state and is git-ignored. Delete it to start again from the scenario.
+
+### How to run it
+
+```bash
+npm install          # once: installs Express and the TypeScript toolchain
+npm run serve        # builds, replays data/events.ndjson, listens on http://127.0.0.1:3000
+```
+
+The server prints:
+
+```
+created data/events.ndjson from data/scenario.ndjson        (first start only)
+replayed 10 events for 2 accounts; listening on http://127.0.0.1:3000
+  try: curl http://127.0.0.1:3000/accounts/ACC-001/ledger
+```
+
+Options:
+
+```bash
+node dist/bin/serve.js [events.ndjson] [--accounts file] [--seed file] [--port N] [--host H] [--vat-bps N]
+PORT=8080 HOST=0.0.0.0 npm run serve     # the port and host can also come from the environment
+```
+
+**1. Read a ledger**
+
+```bash
+curl http://127.0.0.1:3000/accounts/ACC-001/ledger
+curl http://127.0.0.1:3000/accounts/ACC-002/ledger
+```
+
+For the scenario, ACC-001 closes at `"390.92"` and ACC-002 at `"10.008"`.
+
+**2. Add an event.** No `day` is given, so it lands on the last day in the file (D6).
+
+```bash
+curl -X POST http://127.0.0.1:3000/accounts/ACC-001/events \
+  -H 'content-type: application/json' \
+  -d '{"id":"E11","type":"DEBIT","currency":"AED","amount":"50.00",
+       "counterparty":{"accountNumber":"EXT-SHOP","accountName":"Shop"}}'
+```
+
+Response (abridged):
+
+```json
+{ "status": "ACCEPTED", "outcome": "POSTED", "postingDay": 6, "processedOnDay": 6,
+  "entries": ["E11"], "ledger": { "balances": { "closing": "340.90", ... }, ... } }
+```
+
+The closing balance moves from 390.92 to 340.90. That is the 50.00 debit, plus 0.02 less D6 interest,
+because interest is capitalized at the D6 close on the lower balance. The event is now the last line of
+`data/events.ndjson`:
+
+```json
+{"id":"E11","day":6,"type":"DEBIT","currency":"AED","amount":"50.00","counterparty":{...},"account":"ACC-001"}
+```
+
+**3. A rejected event is not saved**
+
+```bash
+curl -i -X POST http://127.0.0.1:3000/accounts/ACC-001/events \
+  -H 'content-type: application/json' \
+  -d '{"id":"E12","type":"SETTLEMENT","currency":"AED","authId":"Auth-Q","amount":"5.00"}'
+# HTTP/1.1 422  {"error":{"code":"SETTLEMENT_UNKNOWN_AUTH","message":"SETTLEMENT E12 on ACC-001 REJECTED ..."}, ...}
+```
+
+`data/events.ndjson` is unchanged.
+
+**4. Check persistence.** Stop the server (Ctrl-C) and start it again:
+
+```bash
+npm run serve        # now prints: replayed 11 events for 2 accounts; ...
+curl http://127.0.0.1:3000/accounts/ACC-001/ledger   # E11 is still there; closing is still "340.90"
+```
+
+**5. Start again from the scenario:** `rm data/events.ndjson`, then `npm run serve`.
+
+### Tests
+
+`test/api/ledger-endpoint.test.ts` covers the endpoints (8 tests, part of `npm test`). It runs a real
+listener on an ephemeral port against a temp copy of the scenario file and checks:
+- the ledger JSON for both accounts;
+- that an accepted POST is appended to the file, shows up in `GET`, and survives a rebuild from the file (a
+  restart);
+- that rejected events (`DUPLICATE_EVENT`, `SETTLEMENT_UNKNOWN_AUTH`, `AMOUNT_PRECISION`, `OUT_OF_WINDOW`)
+  return `422` and leave the file byte-for-byte unchanged;
+- the `400`, `404` and `405` cases.
+
+### Limits
+
+- **The window is still D1–D6.** Interest is capitalized at the D6 close. An event on D6 is booked before
+  that close, and a day past D6 is rejected with `OUT_OF_WINDOW`. An open-ended, rolling window would need
+  a business rule for when interest capitalizes, and that is not decided here.
+- **Every POST replays the whole events file.** That's instant at this size but grows with the file. A large
+  stream would need snapshots.
+- **Writes are serialized within one process.** Run a single server per events file.
+- **The API runs the ledger in-process (one shard).** The worker-thread sharding is used only by the replay
+  CLI.

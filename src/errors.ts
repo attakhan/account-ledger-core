@@ -1,10 +1,8 @@
-'use strict';
-
 /**
  * Every rejection the ledger can produce. A code is stable API: tests and
  * downstream consumers match on it, never on the message text.
  */
-const CODES = Object.freeze({
+export const CODES = Object.freeze({
   INVALID_JSON: 'INVALID_JSON',
   INVALID_EVENT: 'INVALID_EVENT',
   UNKNOWN_EVENT_TYPE: 'UNKNOWN_EVENT_TYPE',
@@ -32,10 +30,15 @@ const CODES = Object.freeze({
   VALUE_DATE_BEFORE_ORIGINAL: 'VALUE_DATE_BEFORE_ORIGINAL',
   FEE_NOT_CONFIGURED: 'FEE_NOT_CONFIGURED',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
-});
+} as const);
 
-class LedgerError extends Error {
-  constructor(code, message, details) {
+export type ErrorCode = (typeof CODES)[keyof typeof CODES];
+
+export class LedgerError extends Error {
+  readonly code: ErrorCode;
+  declare readonly details?: unknown;
+
+  constructor(code: ErrorCode, message: string, details?: unknown) {
     // Business rejections are expected at volume (orphan settlements, duplicates…).
     // Capturing a stack for each one was ~10% of replay CPU in profiling, and the
     // stack carries no information for a rejection, so it is skipped.
@@ -50,12 +53,12 @@ class LedgerError extends Error {
 }
 
 /** Unexpected invariant break — a bug, never a business rejection. */
-class InvariantError extends Error {
-  constructor(message, details) {
+export class InvariantError extends Error {
+  declare readonly details?: unknown;
+
+  constructor(message: string, details?: unknown) {
     super(message);
     this.name = 'InvariantError';
     if (details !== undefined) this.details = details;
   }
 }
-
-module.exports = { CODES, LedgerError, InvariantError };
