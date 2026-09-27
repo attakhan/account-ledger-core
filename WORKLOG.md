@@ -118,3 +118,20 @@ AMBIGUITIES/README rather than hidden.
   keeps 2^51. The test was fixed, not the code.
 - Known-failing test: `test/known-failing/fees-after-reversal.test.js`. It shows AED 75.00 in fees surviving
   a same-value-date reversal, and a control test shows the fees depend on arrival order.
+
+### 2026-09-27 17:56 — write-ups, final verification
+- Wrote REJECTED.md (4 criteria refused: C2, C6, C7, C8; C4 and C5 accepted with caveats, plus 10 abandoned
+  approaches), AMBIGUITIES.md (29 entries), NUMBERS.md (every constant, with the "why not half" answer
+  for each) and the README.
+- Final checks:
+  - `npm test`: 48/48 pass. `npm run test:known-failing`: 1 fail (intended) + 1 control pass.
+  - `--json` parses.
+  - `scripts/bench.js` on 30k events: sharding is *slower* than in-process at that size (77k vs 53–55k
+    events/s) because worker startup and message overhead dominate. That is why the default is
+    in-process. At 1M events 2 shards win (85.9k vs 68.6k).
+- Re-derived the ACC-001 interest by hand from the final restated balances (250, 225, 625, 415, 390, 390)
+  × 0.0004 = 0.10, 0.09, 0.25, 0.166, 0.156, 0.156. Σ exact 0.918 → capitalized 0.92, which matches the
+  engine.
+- One inconsistency noticed and left as documented rather than "fixed": the D5 accrual for ACC-001 is first
+  recorded on D6 as an ACCRUAL_ADJUSTMENT (+0.15). D5 had closed at 0 accrual (negative day), so strictly
+  it adjusts a zero. The label is technically right but reads oddly.
